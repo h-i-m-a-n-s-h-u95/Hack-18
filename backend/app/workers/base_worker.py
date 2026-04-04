@@ -118,54 +118,74 @@ class BaseWorker:
         """Handle incoming request message"""
         try:
             self._request_count += 1
-            
+        
             # Parse message based on agent type
             request = self._parse_request(message_data)
-            
+        
             if request.action != MessageAction.REQUEST:
                 self.logger.warning(f"Ignoring non-request message: {request.action}")
                 return
-            
+        
             self.logger.info(
                 f"📥 Received request - Session: {request.session_id}, "
                 f"Request: {request.request_id}"
             )
-            
+        
             # Process request with timeout
             timeout = message_data.get("metadata", {}).get("timeout_ms", 30000) / 1000
-            
+        
             try:
-                response = await asyncio.wait_for(
-                    self.agent.process_mcp_request(request),
+                # Convert Pydantic model to dict before passing to agent
+                agent_response = await asyncio.wait_for(
+                    self.agent.handle_request(request.dict()),
                     timeout=timeout
+                )   
+            
+             # Wrap agent's dict response in proper MCP response message
+                from app.messaging.protocols import MessageFactory
+                response = MessageFactory.create_response(
+                    request=request,
+                    agent=self.agent_type,
+                    success=True,
+                    data=agent_response  # Agent's dict response goes in data field
                 )
+            
             except asyncio.TimeoutError:
                 self.logger.error(f"Request timeout after {timeout}s")
+                from app.messaging.protocols import MessageFactory
+                response = MessageFactory.create_response(
+                request=request,
+                agent=self.agent_type,
+                success=False,
+                error=f"Request timeout after {timeout}s"
+                )
+            except Exception as e:
+                self.logger.error(f"Agent error: {str(e)}", exc_info=True)
                 from app.messaging.protocols import MessageFactory
                 response = MessageFactory.create_response(
                     request=request,
                     agent=self.agent_type,
                     success=False,
-                    error=f"Request timeout after {timeout}s"
+                    error=str(e)
                 )
-            
+        
             # Publish response to session-specific channel
             response_channel = RedisChannels.get_response_channel(
                 self.agent_type.value,
                 request.session_id
             )
-            
+        
+            # Now response is a Pydantic model, so .dict() works
             await self.redis_client.publish(response_channel, response.dict())
-            
+        
             self.logger.info(
                 f"📤 Sent response - Session: {request.session_id}, "
                 f"Success: {response.success}"
             )
-            
+        
         except Exception as e:
             self._error_count += 1
             self.logger.error(f"Failed to handle request: {str(e)}", exc_info=True)
-    
     async def _handle_error(self, error: Exception):
         """Handle subscription errors"""
         self._error_count += 1

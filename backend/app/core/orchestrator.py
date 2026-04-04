@@ -81,7 +81,7 @@ class TravelOrchestrator:
         # Save initial state to Redis
         await self.redis_client.set_state(state["session_id"], dict(state))
         
-        return state
+        return staten
     
     async def _route_requests_node(self, state: TravelState) -> TravelState:
         """Determine which agents need to be called"""
