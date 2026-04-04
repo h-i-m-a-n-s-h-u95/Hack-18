@@ -400,3 +400,48 @@ Keep the analysis concise and practical - 3-4 sentences maximum.
                 unique_events.append(event)
         
         return unique_events
+
+
+# ==================== STANDALONE RUNNER ====================
+
+async def run_events_agent_standalone():
+    """Run the events agent as a standalone service"""
+    from app.messaging.redis_client import get_redis_client, RedisChannels
+    from app.config.settings import settings
+    
+    # Get Redis client
+    redis_client = get_redis_client()
+    await redis_client.connect()
+    
+    # Create events agent
+    events_agent = EventsAgent(
+        redis_client=redis_client,
+        gemini_api_key=settings.google_api_key,
+        model_name=settings.model_name
+    )
+    
+    # Start the agent
+    await events_agent.start()
+    
+    print(f"✅ Events Agent is running!")
+    print(f"   Agent: {events_agent.name}")
+    print(f"   Type: {events_agent.agent_type.value}")
+    print(f"   Listening on: {RedisChannels.get_request_channel('events')}")
+    print(f"\nPress Ctrl+C to stop...")
+    
+    try:
+        # Keep running
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("\n\n🛑 Shutting down Events Agent...")
+        await events_agent.stop()
+        await redis_client.disconnect()
+        print("✅ Events Agent stopped")
+
+
+if __name__ == "__main__":
+    import asyncio
+    from app.messaging.redis_client import RedisChannels
+    
+    asyncio.run(run_events_agent_standalone())
