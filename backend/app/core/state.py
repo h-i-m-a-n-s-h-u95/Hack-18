@@ -28,7 +28,6 @@ class WorkflowStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     PARTIAL = "partial"
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
 
 
 class AirPollutionInfo(BaseModel):
@@ -153,7 +152,6 @@ class TravelState(TypedDict):
     workflow_status: WorkflowStatus
     created_at: str  # ISO format
     updated_at: str  # ISO format
-    extracted_params: Optional[Dict[str, Any]]
     
     # Input Parameters
     destination: str
@@ -231,7 +229,6 @@ def create_initial_state(
         workflow_status=WorkflowStatus.INITIALIZED,
         created_at=now,
         updated_at=now,
-        extracted_params=None,
         
         # Input
         destination=destination,
