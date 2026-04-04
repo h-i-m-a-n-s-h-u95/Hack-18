@@ -455,3 +455,48 @@ Keep the narrative concise (5-6 sentences) before the JSON.
             self.logger.error(f"Error extracting structured itinerary data: {e}")
         
         return None
+
+
+# ==================== STANDALONE RUNNER ====================
+
+async def run_itinerary_agent_standalone():
+    """Run the itinerary agent as a standalone service"""
+    from app.messaging.redis_client import get_redis_client, RedisChannels
+    from app.config.settings import settings
+    
+    # Get Redis client
+    redis_client = get_redis_client()
+    await redis_client.connect()
+    
+    # Create itinerary agent
+    itinerary_agent = ItineraryAgent(
+        redis_client=redis_client,
+        gemini_api_key=settings.google_api_key,
+        model_name=settings.model_name
+    )
+    
+    # Start the agent
+    await itinerary_agent.start()
+    
+    print(f"✅ Itinerary Agent is running!")
+    print(f"   Agent: {itinerary_agent.name}")
+    print(f"   Type: {itinerary_agent.agent_type.value}")
+    print(f"   Listening on: {RedisChannels.get_request_channel('itinerary')}")
+    print(f"\nPress Ctrl+C to stop...")
+    
+    try:
+        # Keep running
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("\n\n🛑 Shutting down Itinerary Agent...")
+        await itinerary_agent.stop()
+        await redis_client.disconnect()
+        print("✅ Itinerary Agent stopped")
+
+
+if __name__ == "__main__":
+    import asyncio
+    from app.messaging.redis_client import RedisChannels
+    
+    asyncio.run(run_itinerary_agent_standalone())
