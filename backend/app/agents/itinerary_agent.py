@@ -1,140 +1,439 @@
-# ItineraryAgent.py
+"""
+Itinerary Agent Implementation with LangChain Tools and Redis Pub/Sub
 
+Follows the same structure as other agents:
+- Extends BaseAgent
+- Uses LangChain tools for itinerary planning
+- Supports MCP protocol via Redis pub/sub
+- Streaming updates
+- Synthesizes data from all other agents
+"""
+
+from typing import Dict, Any, List, Optional
+import logging
 import json
 import re
-from typing import Any, List, Optional,Dict
-from app.agents.base_agent import BaseAgent
-from app.core.state import TravelState, ItineraryDay
+from datetime import datetime
+
+from app.agents.base_agent import BaseAgent, AgentType, StreamingUpdateType
+from app.tools.itinerary_tools import ITINERARY_TOOLS, create_daily_itinerary, get_destination_info, optimize_itinerary_by_weather
+from app.messaging.redis_client import RedisClient
 from app.services.itinerary_service import ItineraryService
-import logging
 
-logger = logging.getLogger(__name__)
 
-class EnhancedItineraryAgent(BaseAgent):
-    """Enhanced Itinerary Weaver with structured data extraction"""
+class ItineraryAgent(BaseAgent):
+    """
+    Itinerary Agent - Day planning and activity coordination
     
-    def __init__(self):
+    Uses LangChain tools and Google Gemini to synthesize all travel data into a coherent itinerary
+    """
+    
+    def __init__(
+        self,
+        redis_client: RedisClient,
+        gemini_api_key: str = None,
+        model_name: str = "gemini-2.0-flash-exp"
+    ):
         super().__init__(
-            name="Itinerary Weaver",
+            name="Chronomancer",
             role="Day Planner & Activity Coordinator",
-            expertise="Itinerary creation, activity scheduling, and travel timeline optimization"
+            expertise="Itinerary creation, activity scheduling, and travel timeline optimization",
+            agent_type=AgentType.ITINERARY,
+            redis_client=redis_client,
+            tools=ITINERARY_TOOLS,
+            gemini_api_key=gemini_api_key,
+            model_name=model_name
         )
-        from app.services.itinerary_service import ItineraryService
+        
         self.itinerary_service = ItineraryService()
     
     def get_system_prompt(self) -> str:
-        return """
-        You are the Itinerary Weaver, a day-by-day travel planning expert. Your role is to:
-        1. Create detailed daily itineraries with optimal activity scheduling
-        2. Balance must-see attractions with local experiences
-        3. Consider weather conditions for activity planning
-        4. Optimize travel time and minimize backtracking
-        5. Include practical tips for each day
-        6. Suggest realistic timeframes for activities
-        
-        IMPORTANT: At the end of your response, provide a JSON block with structured itinerary data:
-        ```json
-        {
-            "optimized_itinerary": [
-                {
-                    "day": 1,
-                    "date": "YYYY-MM-DD",
-                    "activities": [
-                        {
-                            "time": "HH:MM AM/PM",
-                            "activity": "Activity name",
-                            "duration": "X hours",
-                            "cost": number,
-                            "tips": "Practical tip"
-                        }
-                    ],
-                    "total_cost": number,
-                    "weather_considerations": "Weather notes"
-                }
+        """Get the system prompt for the itinerary agent"""
+        return f"""
+You are {self.name}, a {self.role}. Your role is to:
+
+1. Create detailed daily itineraries with optimal activity scheduling
+2. Balance must-see attractions with local experiences
+3. Consider weather conditions for activity planning
+4. Optimize travel time and minimize backtracking
+5. Include practical tips for each day
+6. Suggest realistic timeframes for activities
+7. Synthesize data from weather, events, maps, and budget agents
+
+Expertise: {self.expertise}
+
+You have access to itinerary tools that can:
+- Get destination information (attractions, food, tips)
+- Create daily itineraries
+- Plan single day activities
+- Get food recommendations
+- Get travel tips
+- Optimize itineraries by weather
+- Estimate time per attraction
+
+Always provide practical, realistic schedules that travelers can actually follow.
+Consider factors like:
+- Travel time between attractions
+- Opening hours and peak times
+- Meal times and rest periods
+- Weather conditions
+- Budget constraints
+- Energy levels throughout the day
+
+IMPORTANT: At the end of your response, provide a JSON block with structured itinerary data:
+```json
+{{
+    "optimized_itinerary": [
+        {{
+            "day": 1,
+            "date": "YYYY-MM-DD",
+            "activities": [
+                {{
+                    "time": "HH:MM AM/PM",
+                    "activity": "Activity name",
+                    "duration": "X hours",
+                    "cost": number,
+                    "tips": "Practical tip"
+                }}
             ],
-            "transport_details": {
-                "recommended_trains": ["Train name - departure time"],
-                "booking_tips": ["Tip 1", "Tip 2"],
-                "local_transport": "Recommendations"
-            },
-            "key_tips": [
-                "Important tip 1",
-                "Important tip 2"
-            ]
-        }
-        ```
-        """
+            "total_cost": number,
+            "weather_considerations": "Weather notes"
+        }}
+    ],
+    "transport_details": {{
+        "recommended_trains": ["Train name - departure time"],
+        "booking_tips": ["Tip 1", "Tip 2"],
+        "local_transport": "Recommendations"
+    }},
+    "key_tips": [
+        "Important tip 1",
+        "Important tip 2"
+    ]
+}}
+```
+
+Keep daily plans realistic - don't overschedule. Allow time for spontaneity and rest.
+"""
     
-    async def process(self, state: TravelState) -> TravelState:
-        """Enhanced processing with structured data extraction"""
-        self.log_action("Starting enhanced itinerary planning", f"Destination: {state['destination']}, Days: {len(state['travel_dates'])}")
+    async def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle itinerary request
+        
+        Expected request payload (complete travel state from orchestrator):
+        {
+            "destination": "Agra, India",
+            "origin": "New Delhi, India",
+            "travel_dates": ["2025-07-01", "2025-07-02"],
+            "travelers_count": 2,
+            "budget_range": "mid-range",
+            "weather_data": {...},  # from weather agent (DICT with weather_forecast inside)
+            "events_data": {...},   # from events agent
+            "maps_data": {...},     # from maps agent
+            "budget_data": {...}    # from budget agent
+        }
+        
+        Returns:
+        {
+            "itinerary_days": [...],
+            "itinerary_narrative": "...",
+            "structured_data": {...},
+            "transport_details": {...},
+            "key_tips": [...]
+        }
+        """
+        payload = request.get("payload", {})
+        session_id = request.get("session_id")
+        
+        destination = payload.get("destination")
+        travel_dates = payload.get("travel_dates", [])
+        travelers_count = payload.get("travelers_count", 1)
+        
+        # Validate required fields
+        if not destination:
+            raise ValueError("Missing required field: destination")
+        if not travel_dates:
+            raise ValueError("Missing required field: travel_dates")
+        
+        self.log_action("Creating itinerary", f"{destination}, {len(travel_dates)} days")
+        
+        # Progress update: Getting destination info
+        await self._send_streaming_update(
+            session_id=session_id,
+            update_type=StreamingUpdateType.PROGRESS,
+            message=f"Gathering information about {destination}",
+            progress_percent=20
+        )
+        
+        # Get destination information using tool
+        dest_info_result = await get_destination_info.ainvoke({
+            "destination": destination
+        })
+        
+        # Progress update: Creating initial itinerary
+        await self._send_streaming_update(
+            session_id=session_id,
+            update_type=StreamingUpdateType.PROGRESS,
+            message="Creating day-by-day itinerary",
+            progress_percent=40,
+            data={"destination_info_loaded": True}
+        )
+        
+        # Extract budget total if available
+        budget_total = None
+        if payload.get("budget_data"):
+            budget_data = payload["budget_data"]
+            if isinstance(budget_data, dict):
+                budget_breakdown = budget_data.get("budget_breakdown", {})
+                if isinstance(budget_breakdown, dict):
+                    budget_total = budget_breakdown.get("total")
+        
+        # ===== FIX: Extract weather_forecast list from weather_data dict =====
+        weather_forecast_list = []
+        if payload.get("weather_data"):
+            weather_data = payload["weather_data"]
+            if isinstance(weather_data, dict):
+                # Extract the actual forecast list
+                weather_forecast_list = weather_data.get("weather_forecast", [])
+            elif isinstance(weather_data, list):
+                # Already a list
+                weather_forecast_list = weather_data
+        
+        # Create initial itinerary using tool
+        itinerary_result = await create_daily_itinerary.ainvoke({
+            "destination": destination,
+            "travel_dates": travel_dates,
+            "weather_data": weather_forecast_list,  # ← Pass the LIST, not the dict
+            "budget_total": budget_total,
+            "travelers_count": travelers_count
+        })
+        
+        if "error" in itinerary_result:
+            raise Exception(f"Itinerary creation failed: {itinerary_result['error']}")
+        
+        # Progress update: Optimizing by weather
+        await self._send_streaming_update(
+            session_id=session_id,
+            update_type=StreamingUpdateType.PROGRESS,
+            message="Optimizing schedule based on weather",
+            progress_percent=60
+        )
+        
+        # Optimize by weather if weather data available
+        weather_optimization = None
+        if weather_forecast_list:  # Use the extracted list
+            weather_opt_result = await optimize_itinerary_by_weather.ainvoke({
+                "destination": destination,
+                "travel_dates": travel_dates,
+                "weather_data": weather_forecast_list  # ← Pass the LIST here too
+            })
+            if "error" not in weather_opt_result:
+                weather_optimization = weather_opt_result
+        
+        # Progress update: Synthesizing with LLM
+        await self._send_streaming_update(
+            session_id=session_id,
+            update_type=StreamingUpdateType.PROGRESS,
+            message="Generating personalized recommendations",
+            progress_percent=80
+        )
+        
+        # Generate comprehensive itinerary narrative using LLM
+        itinerary_narrative = await self._generate_itinerary_synthesis(
+            itinerary_result=itinerary_result,
+            dest_info=dest_info_result,
+            weather_optimization=weather_optimization,
+            payload=payload,
+            session_id=session_id
+        )
+        
+        # Extract structured data from LLM response
+        structured_data = self._extract_structured_itinerary_data(itinerary_narrative)
+        
+        # Format final itinerary days
+        itinerary_days_list = []
+        transport_details = {}
+        key_tips = []
+        
+        if structured_data and 'optimized_itinerary' in structured_data:
+            # Use LLM-optimized itinerary
+            for day_data in structured_data['optimized_itinerary']:
+                activities = []
+                if isinstance(day_data.get('activities'), list):
+                    for activity in day_data['activities']:
+                        if isinstance(activity, dict):
+                            activity_str = f"{activity.get('time', '')}: {activity.get('activity', '')} ({activity.get('duration', '')})"
+                            if activity.get('tips'):
+                                activity_str += f" - {activity['tips']}"
+                            activities.append(activity_str)
+                        else:
+                            activities.append(str(activity))
+                
+                day_dict = {
+                    "day": day_data.get('day', 1),
+                    "date": day_data.get('date', ''),
+                    "activities": activities,
+                    "notes": day_data.get('weather_considerations', ''),
+                    "estimated_cost": day_data.get('total_cost', 1500)
+                }
+                itinerary_days_list.append(day_dict)
+            
+            transport_details = structured_data.get('transport_details', {})
+            key_tips = structured_data.get('key_tips', [])
+        else:
+            # Use basic itinerary from tool
+            for day_data in itinerary_result.get("itinerary", []):
+                itinerary_days_list.append({
+                    "day": day_data.get("day", 1),
+                    "date": day_data.get("date", ""),
+                    "activities": day_data.get("activities", []),
+                    "notes": day_data.get("notes", ""),
+                    "estimated_cost": day_data.get("estimated_cost", 1500)
+                })
+        
+        # Progress update: Finalizing
+        await self._send_streaming_update(
+            session_id=session_id,
+            update_type=StreamingUpdateType.PROGRESS,
+            message="Finalizing itinerary",
+            progress_percent=95
+        )
+        
+        self.log_action("Itinerary created", f"{len(itinerary_days_list)} days planned")
+        
+        return {
+            "itinerary_days": itinerary_days_list,
+            "itinerary_narrative": itinerary_narrative,
+            "structured_data": structured_data or {},
+            "transport_details": transport_details,
+            "key_tips": key_tips,
+            "destination": destination,
+            "total_days": len(travel_dates),
+            "travelers_count": travelers_count
+        }  
+    async def _generate_itinerary_synthesis(
+        self,
+        itinerary_result: Dict[str, Any],
+        dest_info: Dict[str, Any],
+        weather_optimization: Optional[Dict[str, Any]],
+        payload: Dict[str, Any],
+        session_id: str
+    ) -> str:
+        """Generate comprehensive itinerary synthesis using LLM"""
+        
+        # Format all available data for LLM
+        synthesis_text = self._format_synthesis_data(
+            itinerary_result,
+            dest_info,
+            weather_optimization,
+            payload
+        )
+        
+        user_input = f"""
+Create a comprehensive, personalized travel itinerary:
+
+DESTINATION: {payload.get('destination')}
+ORIGIN: {payload.get('origin', 'Not specified')}
+TRAVEL DATES: {', '.join(payload.get('travel_dates', []))} ({len(payload.get('travel_dates', []))} days)
+TRAVELERS: {payload.get('travelers_count', 1)} people
+BUDGET: {payload.get('budget_range', 'mid-range')}
+
+{synthesis_text}
+
+Please provide:
+1. Optimized day-by-day schedule with specific times (be realistic about travel time)
+2. Specific transport recommendations (train names, booking platforms like IRCTC/MakeMyTrip)
+3. Activity duration estimates
+4. Cost breakdown per activity
+5. Weather-based activity suggestions
+6. Integration of local events if available
+7. Practical booking and timing tips
+8. Best times to visit each attraction
+
+Remember to:
+- Allow time for meals and rest
+- Consider opening hours and peak times
+- Account for travel time between locations
+- Don't overschedule - quality over quantity
+- Include buffer time for unexpected delays
+
+Include the structured JSON data at the end of your response.
+Keep the narrative concise (5-6 sentences) before the JSON.
+"""
         
         try:
-            # Get initial itinerary from service
-            initial_itinerary = self.itinerary_service.create_daily_itinerary(
-                destination=state['destination'],
-                travel_dates=state['travel_dates'],
-                weather_data=state.get('weather_data'),
-                budget_data=state.get('budget_data'),
-                travelers_count=state.get('travelers_count', 1)
+            synthesis = await self.invoke_llm(
+                system_prompt=self.get_system_prompt(),
+                user_input=user_input,
+                session_id=session_id,
+                stream_progress=False  # Already sent progress updates
             )
-            
-            # Generate enhanced insights with structured data
-            itinerary_analysis = await self._generate_enhanced_itinerary_insights(initial_itinerary, state)
-            
-            # Extract structured data from LLM response
-            structured_data = self._extract_structured_itinerary_data(itinerary_analysis)
-            
-            # Update itinerary with LLM recommendations if available
-            if structured_data and 'optimized_itinerary' in structured_data:
-                # Convert structured data back to ItineraryDay objects
-                from app.core.state import ItineraryDay
-                enhanced_itinerary = []
-                
-                for day_data in structured_data['optimized_itinerary']:
-                    activities = []
-                    if isinstance(day_data.get('activities'), list):
-                        for activity in day_data['activities']:
-                            if isinstance(activity, dict):
-                                activity_str = f"{activity.get('time', '')}: {activity.get('activity', '')} ({activity.get('duration', '')})"
-                                if activity.get('tips'):
-                                    activity_str += f" - {activity['tips']}"
-                                activities.append(activity_str)
-                            else:
-                                activities.append(str(activity))
-                    
-                    day = ItineraryDay(
-                        day=day_data.get('day', 1),
-                        date=day_data.get('date', ''),
-                        activities=activities,
-                        notes=day_data.get('weather_considerations', ''),
-                        estimated_cost=day_data.get('total_cost', 1500)
-                    )
-                    enhanced_itinerary.append(day)
-                
-                state['itinerary_data'] = enhanced_itinerary
-                
-                # Store additional structured data
-                state['transport_details'] = structured_data.get('transport_details', {})
-                state['itinerary_tips'] = structured_data.get('key_tips', [])
-            else:
-                state['itinerary_data'] = initial_itinerary
-            
-            self.add_message_to_state(state, itinerary_analysis)
-            self.log_action("Enhanced itinerary planning completed successfully")
-            
+            return synthesis
         except Exception as e:
-            error_msg = f"Failed to create enhanced itinerary: {str(e)}"
-            self.add_error_to_state(state, error_msg)
-            logger.error(error_msg)
-            
-            # Fallback to basic itinerary
-            state['itinerary_data'] = self._create_fallback_itinerary(state)
-                
-        finally:
-            state['itinerary_complete'] = True
-            
-        return state
+            self.log_error("Failed to generate itinerary synthesis", str(e))
+            return self._get_fallback_summary(itinerary_result)
+    
+    def _format_synthesis_data(
+        self,
+        itinerary_result: Dict[str, Any],
+        dest_info: Dict[str, Any],
+        weather_optimization: Optional[Dict[str, Any]],
+        payload: Dict[str, Any]
+    ) -> str:
+        """Format all available data for LLM synthesis"""
+        lines = []
+        
+        # Destination info
+        lines.append("DESTINATION HIGHLIGHTS:")
+        if dest_info and "must_visit" in dest_info:
+            for attraction in dest_info["must_visit"]:
+                lines.append(f"  • {attraction}")
+        
+        # Weather optimization
+        if weather_optimization and "optimized_itinerary" in weather_optimization:
+            lines.append("\nWEATHER CONSIDERATIONS:")
+            for day in weather_optimization["optimized_itinerary"][:3]:  # First 3 days
+                lines.append(f"  Day {day['day']}: {day['weather']['description']}, {day['weather']['temp_max']}°C")
+                for rec in day.get("recommendations", [])[:2]:
+                    lines.append(f"    - {rec}")
+        
+        # Budget info
+        if payload.get("budget_data"):
+            budget = payload["budget_data"]
+            if isinstance(budget, dict):
+                lines.append(f"\nBUDGET: ₹{budget.get('total', 0):,.0f} total")
+                lines.append(f"  Daily average: ₹{budget.get('total', 0) / len(payload.get('travel_dates', [1])):,.0f}")
+        
+        # Events info
+        if payload.get("events_data"):
+            events = payload["events_data"]
+            if isinstance(events, dict) and events.get("events"):
+                lines.append(f"\nLOCAL EVENTS: {events.get('total_events', 0)} events found")
+                for event in events["events"][:2]:  # Top 2 events
+                    if isinstance(event, dict):
+                        lines.append(f"  • {event.get('name', 'Event')} on {event.get('date', 'TBA')}")
+        
+        # Route info
+        if payload.get("maps_data") or payload.get("route_data"):
+            route = payload.get("maps_data") or payload.get("route_data")
+            if isinstance(route, dict):
+                primary_route = route.get("primary_route", route)
+                if isinstance(primary_route, dict):
+                    lines.append(f"\nTRAVEL: {primary_route.get('distance', 'N/A')} in {primary_route.get('duration', 'N/A')}")
+                    lines.append(f"  Mode: {primary_route.get('transport_mode', 'driving')}")
+        
+        return "\n".join(lines)
+    
+    def _get_fallback_summary(self, itinerary_result: Dict[str, Any]) -> str:
+        """Generate basic fallback summary if LLM fails"""
+        total_days = itinerary_result.get("total_days", 1)
+        destination = itinerary_result.get("destination", "your destination")
+        
+        return (
+            f"Created a {total_days}-day itinerary for {destination}. "
+            f"The plan includes daily activities covering must-visit attractions, "
+            f"local experiences, and dining recommendations. Check the detailed "
+            f"day-by-day breakdown for specific timings and tips."
+        )
     
     def _extract_structured_itinerary_data(self, llm_response: str) -> Optional[Dict[str, Any]]:
         """Extract structured JSON data from LLM response"""
@@ -145,66 +444,14 @@ class EnhancedItineraryAgent(BaseAgent):
                 json_str = json_match.group(1)
                 return json.loads(json_str)
             
+            # Alternative: look for JSON-like structures
+            json_match = re.search(r'\{[^{}]*"optimized_itinerary"[^{}]*\[.*?\][^{}]*\}', llm_response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+                
         except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse structured itinerary data: {e}")
+            self.logger.warning(f"Failed to parse structured itinerary data: {e}")
         except Exception as e:
-            logger.error(f"Error extracting structured itinerary data: {e}")
+            self.logger.error(f"Error extracting structured itinerary data: {e}")
         
         return None
-
-    async def _generate_enhanced_itinerary_insights(self, itinerary_days, state: TravelState) -> str:
-        """Generate enhanced insights with structured data request"""
-        
-        itinerary_summary = self._format_itinerary_for_llm(itinerary_days)
-        location_context = self.format_location_context(state)
-        
-        user_input = f"""
-        {location_context}
-        
-        Current Itinerary:
-        {itinerary_summary}
-        
-        Please provide:
-        1. Optimized daily schedule with specific times
-        2. Specific transport recommendations (train names, timings)
-        3. Activity duration estimates
-        4. Cost breakdown per activity
-        5. Weather-based activity suggestions
-        6. Practical booking and timing tips
-        
-        Include the structured JSON data at the end of your response.
-        """
-        
-        try:
-            insights = await self.invoke_llm(self.get_system_prompt(), user_input)
-            return insights
-        except Exception as e:
-            logger.error(f"Enhanced itinerary insights failed: {str(e)}")
-            return f"Day-by-day itinerary created for {len(itinerary_days)} days."
-    
-    def _format_itinerary_for_llm(self, itinerary_days) -> str:
-        """Format itinerary data for LLM consumption"""
-        formatted_days = []
-        for day in itinerary_days:
-            activities = "\n  • ".join(day.activities)
-            day_info = f"DAY {day.day} ({day.date}):\n  • {activities}\nNotes: {day.notes}\nEstimated Cost: ₹{day.estimated_cost:,.0f}"
-            formatted_days.append(day_info)
-        return "\n".join(formatted_days)
-    
-    def should_process(self, state: TravelState) -> bool:
-        return not state.get('itinerary_complete', False)
-    
-    def _create_fallback_itinerary(self, state: TravelState):
-        """Create fallback itinerary when processing fails"""
-        from app.core.state import ItineraryDay
-        fallback_days = []
-        for i, date_str in enumerate(state['travel_dates']):
-            day_number = i + 1
-            if day_number == 1:
-                activities = ["Arrive", "Check-in", "Explore nearby area"]
-            elif day_number == len(state['travel_dates']):
-                activities = ["Sightseeing", "Pack", "Departure"]
-            else:
-                activities = ["Explore attractions", "Local dining", "Cultural activities"]
-            fallback_days.append(ItineraryDay(day=day_number, date=date_str, activities=activities, notes="Fallback itinerary", estimated_cost=1500))
-        return fallback_days
