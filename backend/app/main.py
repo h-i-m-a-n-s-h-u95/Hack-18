@@ -104,11 +104,19 @@ async def status():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "agents": {
-            "weather": {
+           "weather": {
                 "name": "Sky Gazer",
                 "status": "active",
                 "service": "OpenWeatherMap",
-                "capabilities": ["weather forecasts", "climate analysis", "travel recommendations"]
+                "capabilities": ["weather forecasts", "climate analysis", "travel recommendations"],
+                "timeout": f"{settings.timeout_weather}ms"
+            },
+            "maps": {
+                "name": "Trailblazer",
+                "status": "active",
+                "service": "OpenRouteService",
+                "capabilities": ["route planning", "transportation comparison", "navigation guidance"],
+                "timeout": f"{settings.timeout_maps}ms"
             },
           
         },
