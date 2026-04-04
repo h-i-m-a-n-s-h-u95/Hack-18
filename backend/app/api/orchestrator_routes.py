@@ -10,7 +10,6 @@ from app.core.orchestrator import TravelOrchestrator
 from app.messaging.redis_client import get_redis_client, RedisChannels
 from app.core.state import UserPreferences
 import logging
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["orchestrator"])
@@ -27,6 +26,7 @@ class TripPlanRequest(BaseModel):
     budget_range: Optional[str] = Field(None, description="Budget range (e.g., '$1000-2000')")
     user_preferences: Optional[Dict[str, Any]] = Field(None, description="User preferences")
     session_id: Optional[str] = Field(None, description="Session ID for resuming")
+    include_travel_options: bool = Field(False, description="Include flights, trains, buses, hotels")
     
     class Config:
         json_schema_extra = {
@@ -40,9 +40,20 @@ class TripPlanRequest(BaseModel):
                     "interests": ["art", "food", "history"],
                     "pace": "moderate",
                     "dietary_restrictions": ["vegetarian"]
-                }
+                },
+                "include_travel_options": True
             }
         }
+
+
+class RouteData(BaseModel):
+    """Enhanced route data model"""
+    primary_route: Optional[Dict[str, Any]] = None
+    alternative_routes: Optional[Dict[str, Any]] = None
+    route_analysis: Optional[str] = None
+    recommended_mode: Optional[str] = None
+    comparison: Optional[Dict[str, Any]] = None
+    travel_options: Optional[Dict[str, Any]] = None
 
 
 class TripPlanResponse(BaseModel):
@@ -78,7 +89,8 @@ async def plan_trip(request: TripPlanRequest):
     This endpoint orchestrates multiple AI agents in parallel to:
     - Get weather forecasts
     - Find local events
-    - Calculate routes and travel times
+    - Calculate routes and travel times (with alternatives)
+    - Optionally fetch flights, trains, buses, and hotels
     - Estimate budget
     - Generate a complete itinerary
     """
@@ -87,7 +99,7 @@ async def plan_trip(request: TripPlanRequest):
     try:
         logger.info(
             f"Trip planning request: {request.origin} → {request.destination}, "
-            f"{len(request.travel_dates)} days"
+            f"{len(request.travel_dates)} days, travel_options={request.include_travel_options}"
         )
         
         # Initialize orchestrator
@@ -101,21 +113,33 @@ async def plan_trip(request: TripPlanRequest):
             travelers_count=request.travelers_count,
             budget_range=request.budget_range,
             user_preferences=request.user_preferences,
-            session_id=request.session_id
+            session_id=request.session_id,
+            include_travel_options=request.include_travel_options
         )
         
         # Calculate processing time
         processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
         
-        # Build response
+        # Extract route data (now includes more than just primary_route)
+        route_data = final_state.get("route_data", {})
+        
+        # Build enhanced response with all route data
         return TripPlanResponse(
             session_id=final_state["session_id"],
             status=final_state["workflow_status"].value,
             message=final_state.get("trip_summary", "Trip planning completed"),
             data={
                 "weather": final_state.get("weather_data"),
+                "weather_summary": final_state.get("weather_summary"),
                 "events": final_state.get("events_data"),
-                "route": final_state.get("route_data"),
+                "route": {
+                    "primary_route": route_data.get("primary_route"),
+                    "alternative_routes": route_data.get("alternative_routes"),
+                    "route_analysis": route_data.get("route_analysis"),
+                    "recommended_mode": route_data.get("recommended_mode"),
+                    "comparison": route_data.get("comparison"),
+                    "travel_options": route_data.get("travel_options") if request.include_travel_options else None
+                },
                 "budget": final_state.get("budget_data"),
                 "itinerary": final_state.get("itinerary_data"),
                 "final_itinerary_text": final_state.get("final_itinerary"),
@@ -192,7 +216,8 @@ async def plan_trip_stream(request: TripPlanRequest):
                     travel_dates=request.travel_dates,
                     travelers_count=request.travelers_count,
                     budget_range=request.budget_range,
-                    session_id=session_id
+                    session_id=session_id,
+                    include_travel_options=request.include_travel_options
                 )
             )
             
@@ -200,13 +225,18 @@ async def plan_trip_stream(request: TripPlanRequest):
             while not planning_task.done():
                 try:
                     update = await asyncio.wait_for(updates_queue.get(), timeout=1.0)
-                    yield f"data: {json.dumps(update)}\n\n"
+                    # Send the update with proper JSON serialization
+                    yield f"data: {json.dumps(update, default=str)}\n\n"
                 except asyncio.TimeoutError:
                     # Send heartbeat
-                    yield f"data: {json.dumps({'type': 'heartbeat'},default=str)}\n\n"
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
             
             # Get final result
             final_state = await planning_task
+            
+            # Extract full route data for streaming response
+            route_data = final_state.get("route_data", {})
+            
             result = {
                 "type": "completed",
                 "status": final_state["workflow_status"].value,
@@ -215,9 +245,12 @@ async def plan_trip_stream(request: TripPlanRequest):
                     "completed_agents": final_state["completed_agents"],
                     "failed_agents": final_state["failed_agents"],
                     "trip_summary": final_state.get("trip_summary"),
+                    "weather_summary": final_state.get("weather_summary"),
+                    "route_analysis": route_data.get("route_analysis"),
+                    "recommended_transport": route_data.get("recommended_mode"),
+                    "has_travel_options": bool(route_data.get("travel_options"))
                 },
             }
-            
             
             yield f"data: {json.dumps(result, default=str)}\n\n"
             
@@ -225,7 +258,7 @@ async def plan_trip_stream(request: TripPlanRequest):
             await redis_client.unsubscribe(subscription_id)
             
         except Exception as e:
-            logger.error(f"Streaming failed: {str(e)}")
+            logger.error(f"Streaming failed: {str(e)}", exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
         finally:
             await redis_client.disconnect()
@@ -269,6 +302,60 @@ async def get_session_status(session_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get session status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await orchestrator.redis_client.disconnect()
+
+
+@router.get("/session/{session_id}/full-data")
+async def get_session_full_data(session_id: str):
+    """Get the complete data for a planning session including all route details"""
+    try:
+        orchestrator = TravelOrchestrator()
+        await orchestrator.redis_client.connect()
+        
+        state = await orchestrator.get_session_state(session_id)
+        
+        if not state:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Extract full route data
+        route_data = state.get("route_data", {})
+        
+        return {
+            "session_id": session_id,
+            "workflow_status": state["workflow_status"].value,
+            "data": {
+                "weather": state.get("weather_data"),
+                "weather_summary": state.get("weather_summary"),
+                "events": state.get("events_data"),
+                "route": {
+                    "primary_route": route_data.get("primary_route"),
+                    "alternative_routes": route_data.get("alternative_routes"),
+                    "route_analysis": route_data.get("route_analysis"),
+                    "recommended_mode": route_data.get("recommended_mode"),
+                    "comparison": route_data.get("comparison"),
+                    "travel_options": route_data.get("travel_options")
+                },
+                "budget": state.get("budget_data"),
+                "itinerary": state.get("itinerary_data"),
+                "final_itinerary_text": state.get("final_itinerary")
+            },
+            "metadata": {
+                "completed_agents": state["completed_agents"],
+                "failed_agents": state["failed_agents"],
+                "total_agents": state["total_agents"],
+                "created_at": state["created_at"],
+                "updated_at": state["updated_at"]
+            },
+            "messages": state.get("messages", []),
+            "errors": state.get("errors", [])
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session full data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         await orchestrator.redis_client.disconnect()
