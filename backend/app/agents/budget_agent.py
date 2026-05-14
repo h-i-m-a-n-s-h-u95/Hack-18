@@ -31,8 +31,8 @@ class BudgetAgent(BaseAgent):
     def __init__(
         self,
         redis_client: RedisClient,
-        gemini_api_key: str = None,
-        model_name: str = "gemini-2.0-flash-exp"
+        groq_api_key: str = None,
+        model_name: str = "llama-3.3-70b-versatile"
     ):
         super().__init__(
             name="Quartermaster",
@@ -41,7 +41,7 @@ class BudgetAgent(BaseAgent):
             agent_type=AgentType.BUDGET,
             redis_client=redis_client,
             tools=BUDGET_TOOLS,
-            gemini_api_key=gemini_api_key,
+            groq_api_key=groq_api_key,
             model_name=model_name
         )
         
@@ -449,7 +449,7 @@ async def run_budget_agent_standalone():
     # Create budget agent
     budget_agent = BudgetAgent(
         redis_client=redis_client,
-        gemini_api_key=settings.google_api_key,
+        groq_api_key=settings.groq_api_key,
         model_name=settings.model_name
     )
     

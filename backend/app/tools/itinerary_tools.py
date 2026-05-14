@@ -1,284 +1,274 @@
+"""
+Itinerary Tools - LLM-driven via Groq, no hardcoded city data.
+"""
+
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
 import logging
-
-from app.core.state import ItineraryDay, WeatherInfo, BudgetBreakdown
+import re
+import json
+import os
+import httpx
 
 logger = logging.getLogger(__name__)
 
-# ========================= INPUT SCHEMAS ========================= #
 
-class DestinationInfoInput(BaseModel):
-    """Input schema for destination information."""
-    destination: str = Field(..., description="Destination city or location name")
+# ========================= DATE EXPANSION ========================= #
 
-class DailyItineraryInput(BaseModel):
-    """Input schema for daily itinerary creation."""
-    destination: str = Field(..., description="Destination city or location")
-    travel_dates: List[str] = Field(..., description="List of travel dates in YYYY-MM-DD format")
-    weather_data: Optional[List[Dict[str, Any]]] = Field(None, description="Optional weather data for each day")
-    budget_total: Optional[float] = Field(None, description="Optional total budget for the trip")
-    travelers_count: int = Field(1, description="Number of travelers")
-
-class DayActivitiesInput(BaseModel):
-    """Input schema for planning day activities."""
-    destination: str = Field(..., description="Destination city or location")
-    day_number: int = Field(..., description="Day number in the trip (1-based)")
-    total_days: int = Field(..., description="Total number of days in the trip")
-    weather_temp_max: Optional[float] = Field(None, description="Maximum temperature for the day")
-    precipitation_chance: Optional[float] = Field(None, description="Chance of precipitation (0-100)")
-
-# ========================= HELPER FUNCTIONS ========================= #
-
-class ItineraryServiceHelpers:
-    """Shared helper functions and data for itinerary tools."""
-    
-    # Popular destinations and their main attractions
-    DESTINATION_ATTRACTIONS = {
-        "agra": {
-            "must_visit": [
-                "Taj Mahal - Best visited at sunrise or sunset",
-                "Agra Fort - Explore the Mughal architecture",
-                "Itimad-ud-Daulah (Baby Taj) - Beautiful marble work"
-            ],
-            "optional": [
-                "Mehtab Bagh - Sunset view of Taj Mahal",
-                "Local markets - Handicrafts and leather goods",
-                "Fatehpur Sikri - Day trip to abandoned Mughal city"
-            ],
-            "food": [
-                "Try Agra's famous petha (sweet)",
-                "Mughlai cuisine at local restaurants",
-                "Street food near Sadar Bazaar"
-            ],
-            "tips": [
-                "Book Taj Mahal tickets online in advance",
-                "Carry water and wear comfortable shoes",
-                "Best light for photography: early morning or late afternoon"
-            ]
-        },
-        "delhi": {
-            "must_visit": [
-                "Red Fort - Historic Mughal fortress",
-                "India Gate - War memorial and iconic landmark",
-                "Qutub Minar - UNESCO World Heritage site",
-                "Lotus Temple - Modern architectural marvel"
-            ],
-            "optional": [
-                "Chandni Chowk - Old Delhi markets and street food",
-                "Humayun's Tomb - Beautiful garden tomb",
-                "Connaught Place - Shopping and dining",
-                "Akshardham Temple - Modern Hindu temple complex"
-            ],
-            "food": [
-                "Street food at Chandni Chowk",
-                "Paranthas at Paranthe Wali Gali",
-                "South Indian food at Saravana Bhavan"
-            ],
-            "tips": [
-                "Use Delhi Metro for efficient transport",
-                "Carry cash for street vendors",
-                "Avoid peak traffic hours (8-10 AM, 6-8 PM)"
-            ]
-        },
-        "jaipur": {
-            "must_visit": [
-                "Amber Fort - Majestic hilltop fort",
-                "City Palace - Royal residence and museum",
-                "Hawa Mahal - Palace of Winds",
-                "Jantar Mantar - Ancient astronomical observatory"
-            ],
-            "optional": [
-                "Nahargarh Fort - Sunset views over Jaipur",
-                "Jal Mahal - Palace in the middle of a lake",
-                "Local bazaars - Textiles, jewelry, handicrafts"
-            ],
-            "food": [
-                "Dal Baati Churma - Traditional Rajasthani dish",
-                "Lassi at famous local shops",
-                "Rajasthani thali at heritage restaurants"
-            ],
-            "tips": [
-                "Negotiate prices at local markets",
-                "Carry sunscreen and hat",
-                "Evening sound and light show at Amber Fort"
-            ]
-        },
-        "mumbai": {
-            "must_visit": [
-                "Gateway of India - Iconic monument",
-                "Marine Drive - Scenic waterfront promenade",
-                "Chhatrapati Shivaji Terminus - UNESCO World Heritage railway station",
-                "Elephanta Caves - Ancient rock-cut temples"
-            ],
-            "optional": [
-                "Colaba Causeway - Shopping and dining",
-                "Juhu Beach - Popular beach area",
-                "Sanjay Gandhi National Park - Nature and wildlife",
-                "Film City - Bollywood studio tour"
-            ],
-            "food": [
-                "Vada Pav - Mumbai's famous street food",
-                "Pav Bhaji at local stalls",
-                "Seafood at coastal restaurants"
-            ],
-            "tips": [
-                "Use local trains during non-peak hours",
-                "Try Mumbai's famous dabbawalas lunch delivery",
-                "Best time to visit Marine Drive: evening sunset"
-            ]
-        },
-        "goa": {
-            "must_visit": [
-                "Calangute and Baga Beaches - Popular beaches",
-                "Basilica of Bom Jesus - UNESCO World Heritage church",
-                "Aguada Fort - Historic Portuguese fort",
-                "Dudhsagar Falls - Spectacular waterfall"
-            ],
-            "optional": [
-                "Anjuna Flea Market - Shopping and local culture",
-                "Palolem Beach - Quieter southern beach",
-                "Old Goa Churches - Portuguese colonial architecture",
-                "Spice plantations - Guided tours"
-            ],
-            "food": [
-                "Goan fish curry and rice",
-                "Bebinca - Traditional Goan dessert",
-                "Fresh seafood at beach shacks"
-            ],
-            "tips": [
-                "Rent a scooter for easy transportation",
-                "Try water sports at major beaches",
-                "Visit churches in the morning when they're open"
-            ]
-        }
-    }
-    
-    @staticmethod
-    def get_destination_info(destination: str) -> Dict[str, List[str]]:
-        """Get attractions and tips for a destination."""
-        destination_lower = destination.lower()
-        
-        for city, info in ItineraryServiceHelpers.DESTINATION_ATTRACTIONS.items():
-            if city in destination_lower:
-                return info
-        
-        # Generic fallback
-        return {
-            "must_visit": [f"Explore main attractions in {destination}"],
-            "optional": ["Visit local markets", "Try local cuisine", "Walk around city center"],
-            "food": ["Try local specialties", "Visit popular restaurants"],
-            "tips": ["Research local customs", "Carry water and comfortable shoes", "Keep emergency contacts handy"]
-        }
-    
-    @staticmethod
-    def plan_day_activities(
-        destination: str,
-        day_number: int,
-        total_days: int,
-        weather_temp_max: Optional[float] = None,
-        precipitation_chance: Optional[float] = None
-    ) -> List[str]:
-        """Plan activities for a specific day."""
-        destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-        all_attractions = destination_info["must_visit"] + destination_info["optional"]
-        activities = []
-        
-        if day_number == 1:
-            activities.append("Arrival and check-in to accommodation")
-            if destination_info["must_visit"]:
-                activities.append(destination_info["must_visit"][0])
-            activities.append("Explore nearby area and local food")
-        
-        elif day_number == total_days and total_days > 1:
-            activities.append("Visit remaining attractions or shopping")
-            activities.append("Pack and prepare for departure")
-            activities.append("Departure")
-        
+def expand_travel_dates(travel_dates: List[str]) -> List[str]:
+    """
+    Expand date range strings into individual dates.
+    ["2026-07-15 to 2026-07-18"] -> ["2026-07-15","2026-07-16","2026-07-17","2026-07-18"]
+    """
+    expanded = []
+    for d in travel_dates:
+        d = d.strip()
+        range_match = re.match(
+            r'(\d{4}-\d{2}-\d{2})\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2})', d
+        )
+        if range_match:
+            start = datetime.strptime(range_match.group(1), "%Y-%m-%d")
+            end = datetime.strptime(range_match.group(2), "%Y-%m-%d")
+            cur = start
+            while cur <= end:
+                expanded.append(cur.strftime("%Y-%m-%d"))
+                cur += timedelta(days=1)
         else:
-            attractions_per_day = max(2, len(destination_info["must_visit"]) // max(1, total_days - 1))
-            start_idx = (day_number - 2) * attractions_per_day
-            end_idx = min(start_idx + attractions_per_day, len(all_attractions))
-            activities.extend(all_attractions[start_idx:end_idx])
-            
-            if destination_info["food"]:
-                food_idx = (day_number - 1) % len(destination_info["food"])
-                activities.append(destination_info["food"][food_idx])
-        
-        # Weather-based adjustments
-        if precipitation_chance and precipitation_chance > 70:
-            activities.append("⚠️ High chance of rain - carry umbrella")
-        if weather_temp_max and weather_temp_max > 35:
-            activities.append("🌡️ Hot weather - plan indoor activities during midday")
-        if weather_temp_max and weather_temp_max < 15:
-            activities.append("🧥 Cold weather - dress warmly")
-        
-        return activities
-    
-    @staticmethod
-    def estimate_daily_cost(
-        budget_total: Optional[float],
-        total_days: int,
-        travelers_count: int
-    ) -> float:
-        """Estimate cost for a single day."""
-        if not budget_total or total_days == 0:
-            return 1500.0  # Default daily estimate in INR
-        
-        return budget_total / total_days
-    
-    @staticmethod
-    def create_day_notes(
-        weather_data: Optional[Dict[str, Any]],
-        destination_info: Dict[str, List[str]],
-        day_number: int
-    ) -> str:
-        """Create helpful notes for the day."""
-        notes = []
-        
-        if weather_data:
-            temp_min = weather_data.get("temp_min", "?")
-            temp_max = weather_data.get("temp_max", "?")
-            description = weather_data.get("description", "N/A")
-            notes.append(f"Weather: {description}, {temp_min}-{temp_max}°C")
-            
-            precipitation_chance = weather_data.get("precipitation_chance", 0)
-            if precipitation_chance > 50:
-                notes.append("Chance of rain - plan indoor activities")
-            
-            wind_speed = weather_data.get("wind_speed", 0)
-            if wind_speed > 15:
-                notes.append("Windy conditions - secure loose items")
-        
-        if destination_info["tips"]:
-            tip_idx = (day_number - 1) % len(destination_info["tips"])
-            notes.append(f"Tip: {destination_info['tips'][tip_idx]}")
-        
-        return " | ".join(notes) if notes else "Enjoy your day of exploration!"
+            expanded.append(d)
+    return expanded if expanded else travel_dates
+
+
+# ========================= GROQ LLM CALL ========================= #
+
+async def generate_llm_itinerary(
+    destination: str,
+    origin: str,
+    travel_dates: List[str],
+    travelers_count: int,
+    budget_total: Optional[float],
+    budget_range: Optional[str],
+    user_preferences: Optional[str],
+    weather_data: Optional[List[Dict]],
+    events_data: Optional[List[Dict]],
+    maps_data: Optional[Dict],
+    budget_data: Optional[Dict],
+) -> List[Dict]:
+    """
+    Call Groq API to generate a fully personalized day-by-day itinerary.
+    Returns a list of day dicts: [{day, date, activities, notes, estimated_cost}]
+    """
+    total_days = len(travel_dates)
+    daily_budget = round(budget_total / total_days, 0) if budget_total and total_days else 2000
+
+    # ── Format weather ────────────────────────────────────────────────────────
+    weather_text = ""
+    if weather_data:
+        for i, w in enumerate(weather_data[:total_days]):
+            if isinstance(w, dict):
+                weather_text += (
+                    f"  Day {i+1} ({travel_dates[i] if i < len(travel_dates) else ''}): "
+                    f"{w.get('description', 'N/A')}, "
+                    f"{w.get('temperature_min', '?')}-{w.get('temperature_max', '?')}C, "
+                    f"rain {w.get('precipitation_chance', '?')}%\n"
+                )
+
+    # ── Format events ─────────────────────────────────────────────────────────
+    events_text = ""
+    if events_data:
+        for e in (events_data[:5] if isinstance(events_data, list) else []):
+            if isinstance(e, dict):
+                events_text += (
+                    f"  - {e.get('name', 'Event')} on "
+                    f"{e.get('date', 'TBA')} at {e.get('venue', 'TBA')}\n"
+                )
+
+    # ── Format transport ──────────────────────────────────────────────────────
+    transport_text = ""
+    if maps_data and isinstance(maps_data, dict):
+        primary = maps_data.get("primary_route", {})
+        if isinstance(primary, dict):
+            transport_text = (
+                f"  {primary.get('transport_mode', 'N/A')}: "
+                f"{primary.get('distance', '?')}, {primary.get('duration', '?')}"
+            )
+        alts = maps_data.get("alternative_routes", {})
+        if isinstance(alts, dict):
+            for mode, info in alts.items():
+                if isinstance(info, dict):
+                    transport_text += (
+                        f"\n  {mode}: {info.get('distance','?')}, {info.get('duration','?')}"
+                    )
+
+    # ── Format budget breakdown ───────────────────────────────────────────────
+    budget_text = ""
+    if budget_data and isinstance(budget_data, dict):
+        budget_text = (
+            f"  Transport: INR {budget_data.get('transportation', 0):,.0f}, "
+            f"Stay: INR {budget_data.get('accommodation', 0):,.0f}, "
+            f"Food: INR {budget_data.get('food', 0):,.0f}, "
+            f"Activities: INR {budget_data.get('activities', 0):,.0f}"
+        )
+
+    dates_str = ", ".join(travel_dates)
+
+    prompt = f"""You are an expert Indian travel planner with deep local knowledge. 
+Create a detailed, realistic, personalized day-by-day itinerary.
+
+TRIP DETAILS:
+- Destination: {destination}
+- Origin: {origin}
+- Dates: {dates_str} ({total_days} days)
+- Travelers: {travelers_count} adults
+- Budget: {budget_range or 'moderate'} (~INR {budget_total or 'unspecified'} total, ~INR {daily_budget}/day)
+- Preferences: {user_preferences or 'historical places, local markets, authentic local food, relaxed pace'}
+
+WEATHER FORECAST:
+{weather_text or '  Not available'}
+
+LOCAL EVENTS DURING TRIP:
+{events_text or '  No events data'}
+
+TRANSPORT OPTIONS FROM {origin.upper()} TO {destination.upper()}:
+{transport_text or '  Not available'}
+
+BUDGET BREAKDOWN:
+{budget_text or '  Not available'}
+
+RULES:
+1. Respond ONLY with a valid JSON array — no markdown, no explanation, no extra text
+2. Exactly {total_days} objects in the array, one per date
+3. Dates must be exactly in this order: {dates_str}
+4. Each day has 3-5 activities max (relaxed pace, not overly packed)
+5. Use SPECIFIC real place names, restaurant names, hotel names
+6. Include timing (9:00 AM, 1:00 PM etc) and entry fees where relevant
+7. Day 1: include arrival logistics and hotel recommendation near attractions
+8. Last day: include checkout and departure logistics
+9. Include monsoon/weather tips in notes if applicable
+10. estimated_cost is a number (INR) per day for both travelers combined
+
+Respond with ONLY this JSON structure:
+[
+  {{
+    "day": 1,
+    "date": "{travel_dates[0]}",
+    "activities": [
+      "9:00 AM - Arrive at ...",
+      "11:00 AM - Check in to ...",
+      "1:00 PM - Lunch at ...",
+      "3:00 PM - Visit ...",
+      "7:00 PM - Dinner at ..."
+    ],
+    "notes": "Practical tip or weather note for this day",
+    "estimated_cost": {int(daily_budget)}
+  }}
+]"""
+
+    groq_api_key = os.environ.get("GROQ_API_KEY", "")
+    if not groq_api_key:
+        logger.warning("GROQ_API_KEY not set, using fallback itinerary")
+        return _fallback_itinerary(destination, travel_dates, daily_budget)
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "max_tokens": 4096,
+                    "temperature": 0.7,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a travel planning expert. Always respond with valid JSON only, no markdown, no explanation."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                },
+            )
+
+        if response.status_code != 200:
+            logger.error(f"Groq API error: {response.status_code} {response.text[:300]}")
+            return _fallback_itinerary(destination, travel_dates, daily_budget)
+
+        raw = response.json()["choices"][0]["message"]["content"].strip()
+
+        # Strip accidental markdown fences
+        raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'\s*```$', '', raw, flags=re.MULTILINE)
+        raw = raw.strip()
+
+        days = json.loads(raw)
+
+        if not isinstance(days, list) or len(days) == 0:
+            raise ValueError(f"Invalid response shape: {type(days)}")
+
+        # Ensure correct number of days
+        if len(days) != total_days:
+            logger.warning(
+                f"Groq returned {len(days)} days, expected {total_days}. "
+                f"Patching with fallback for missing days."
+            )
+            # Patch missing days if short
+            while len(days) < total_days:
+                i = len(days)
+                days.append(_fallback_day(destination, i + 1, travel_dates[i], daily_budget))
+
+        logger.info(f"Groq itinerary: {len(days)} days for {destination}")
+        return days
+
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse error from Groq: {e}\nRaw: {raw[:500]}")
+        return _fallback_itinerary(destination, travel_dates, daily_budget)
+    except Exception as e:
+        logger.error(f"Groq itinerary generation failed: {e}")
+        return _fallback_itinerary(destination, travel_dates, daily_budget)
+
+
+def _fallback_day(destination: str, day_num: int, date: str, daily_budget: float) -> Dict:
+    return {
+        "day": day_num,
+        "date": date,
+        "activities": [f"Explore {destination} - Day {day_num} (regenerate for full plan)"],
+        "notes": "Could not generate detailed plan. Please retry.",
+        "estimated_cost": int(daily_budget),
+    }
+
+
+def _fallback_itinerary(
+    destination: str,
+    travel_dates: List[str],
+    daily_budget: float
+) -> List[Dict]:
+    return [
+        _fallback_day(destination, i + 1, date, daily_budget)
+        for i, date in enumerate(travel_dates)
+    ]
+
 
 # ========================= LANGCHAIN TOOLS ========================= #
 
 @tool
 def get_destination_info(destination: str) -> Dict[str, Any]:
-    """Get comprehensive information about a destination including attractions, food, and tips.
-    
+    """Get information about a destination.
+
     Args:
         destination: Destination city or location name
-    
+
     Returns:
-        Dictionary with must-visit attractions, optional attractions, food recommendations, and travel tips
+        Basic destination info
     """
-    info = ItineraryServiceHelpers.get_destination_info(destination)
-    
     return {
         "destination": destination,
-        "must_visit": info["must_visit"],
-        "optional_attractions": info["optional"],
-        "food_recommendations": info["food"],
-        "travel_tips": info["tips"],
-        "total_attractions": len(info["must_visit"]) + len(info["optional"])
+        "note": "Full personalized details will be generated in the itinerary"
     }
 
 
@@ -290,78 +280,171 @@ def create_daily_itinerary(
     budget_total: Optional[float] = None,
     travelers_count: int = 1
 ) -> Dict[str, Any]:
-    """Create a complete day-by-day itinerary for a trip.
-    
+    """Create a complete day-by-day itinerary for a trip using LLM.
+
     Args:
         destination: Destination city or location
         travel_dates: List of travel dates in YYYY-MM-DD format
-        weather_data: Optional list of weather data dictionaries for each day
-        budget_total: Optional total budget for the trip in INR
-        travelers_count: Number of travelers (default: 1)
-    
+        weather_data: Optional weather data for each day
+        budget_total: Optional total budget in INR
+        travelers_count: Number of travelers
+
     Returns:
-        Dictionary with day-by-day itinerary including activities, costs, and notes
+        Dictionary with day-by-day itinerary
     """
+    import asyncio
+
+    # Expand date ranges
+    expanded_dates = expand_travel_dates(travel_dates)
+
+    logger.info(
+        f"create_daily_itinerary tool: raw={travel_dates} -> "
+        f"expanded={expanded_dates} ({len(expanded_dates)} days)"
+    )
+
+    total_days = len(expanded_dates)
+    daily_budget = round(budget_total / total_days, 0) if budget_total and total_days else 2000
+
+    # Run async LLM call from sync context
     try:
-        destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-        itinerary_days = []
-        total_days = len(travel_dates)
-        
-        for i, date_str in enumerate(travel_dates):
-            day_number = i + 1
-            
-            # Get weather for the day
-            day_weather = weather_data[i] if weather_data and i < len(weather_data) else None
-            
-            # Plan activities
-            weather_temp_max = day_weather.get("temp_max") if day_weather else None
-            precipitation_chance = day_weather.get("precipitation_chance") if day_weather else None
-            
-            activities = ItineraryServiceHelpers.plan_day_activities(
-                destination,
-                day_number,
-                total_days,
-                weather_temp_max,
-                precipitation_chance
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    generate_llm_itinerary(
+                        destination=destination,
+                        origin="",
+                        travel_dates=expanded_dates,
+                        travelers_count=travelers_count,
+                        budget_total=budget_total,
+                        budget_range=None,
+                        user_preferences=None,
+                        weather_data=weather_data,
+                        events_data=None,
+                        maps_data=None,
+                        budget_data=None,
+                    )
+                )
+                days = future.result(timeout=90)
+        else:
+            days = loop.run_until_complete(
+                generate_llm_itinerary(
+                    destination=destination,
+                    origin="",
+                    travel_dates=expanded_dates,
+                    travelers_count=travelers_count,
+                    budget_total=budget_total,
+                    budget_range=None,
+                    user_preferences=None,
+                    weather_data=weather_data,
+                    events_data=None,
+                    maps_data=None,
+                    budget_data=None,
+                )
             )
-            
-            # Estimate daily cost
-            estimated_cost = ItineraryServiceHelpers.estimate_daily_cost(
-                budget_total,
-                total_days,
-                travelers_count
-            )
-            
-            # Create notes
-            notes = ItineraryServiceHelpers.create_day_notes(
-                day_weather,
-                destination_info,
-                day_number
-            )
-            
-            itinerary_days.append({
-                "day": day_number,
-                "date": date_str,
-                "activities": activities,
-                "notes": notes,
-                "estimated_cost": round(estimated_cost, 2),
-                "estimated_cost_formatted": f"INR {estimated_cost:,.2f}"
-            })
-        
-        return {
-            "destination": destination,
-            "travelers_count": travelers_count,
-            "total_days": total_days,
-            "start_date": travel_dates[0],
-            "end_date": travel_dates[-1],
-            "itinerary": itinerary_days,
-            "total_estimated_cost": round(budget_total, 2) if budget_total else round(estimated_cost * total_days, 2),
-            "currency": "INR"
-        }
-    
     except Exception as e:
-        logger.error(f"Daily itinerary creation failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"Tool LLM call failed: {e}")
+        days = _fallback_itinerary(destination, expanded_dates, daily_budget)
+
+    return {
+        "destination": destination,
+        "travelers_count": travelers_count,
+        "total_days": total_days,
+        "start_date": expanded_dates[0],
+        "end_date": expanded_dates[-1],
+        "itinerary": days,
+        "total_estimated_cost": budget_total or daily_budget * total_days,
+        "currency": "INR"
+    }
+
+
+@tool
+def optimize_itinerary_by_weather(
+    destination: str,
+    travel_dates: List[str],
+    weather_data: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Optimize itinerary based on weather forecasts.
+
+    Args:
+        destination: Destination city or location
+        travel_dates: List of travel dates
+        weather_data: Weather data for each day
+
+    Returns:
+        Weather-optimized daily recommendations
+    """
+    expanded_dates = expand_travel_dates(travel_dates)
+    optimized_days = []
+
+    for i, date_str in enumerate(expanded_dates):
+        day_weather = weather_data[i] if i < len(weather_data) else {}
+        temp_max = day_weather.get("temp_max", 25)
+        precipitation = day_weather.get("precipitation_chance", 0)
+        recommendations = []
+
+        if precipitation > 70:
+            recommendations.append("High rain chance - prioritize indoor attractions")
+        elif precipitation > 40:
+            recommendations.append("Moderate rain - keep umbrella handy")
+        else:
+            recommendations.append("Good weather for outdoor sightseeing")
+
+        if temp_max > 35:
+            recommendations.append("Very hot - outdoor visits before 11 AM or after 4 PM")
+        elif temp_max < 15:
+            recommendations.append("Cold - dress in layers")
+
+        optimized_days.append({
+            "date": date_str,
+            "day": i + 1,
+            "weather": {
+                "temp_max": temp_max,
+                "precipitation_chance": precipitation,
+                "description": day_weather.get("description", "N/A")
+            },
+            "recommendations": recommendations
+        })
+
+    return {
+        "destination": destination,
+        "optimized_itinerary": optimized_days,
+        "total_days": len(expanded_dates)
+    }
+
+
+@tool
+def get_food_recommendations(destination: str) -> Dict[str, Any]:
+    """Get food recommendations for a destination.
+
+    Args:
+        destination: Destination city or location
+
+    Returns:
+        Food recommendations note
+    """
+    return {
+        "destination": destination,
+        "note": "Specific restaurant recommendations will be included in the LLM-generated itinerary"
+    }
+
+
+@tool
+def get_travel_tips(destination: str) -> Dict[str, Any]:
+    """Get travel tips for a destination.
+
+    Args:
+        destination: Destination city or location
+
+    Returns:
+        Travel tips note
+    """
+    return {
+        "destination": destination,
+        "note": "Practical tips will be included per-day in the generated itinerary"
+    }
 
 
 @tool
@@ -372,173 +455,36 @@ def plan_single_day_activities(
     weather_temp_max: Optional[float] = None,
     precipitation_chance: Optional[float] = None
 ) -> Dict[str, Any]:
-    """Plan activities for a single day of a trip.
-    
-    Args:
-        destination: Destination city or location
-        day_number: Day number in the trip (1-based)
-        total_days: Total number of days in the trip
-        weather_temp_max: Optional maximum temperature for the day in Celsius
-        precipitation_chance: Optional chance of precipitation (0-100)
-    
-    Returns:
-        Dictionary with activities and recommendations for the day
-    """
-    try:
-        activities = ItineraryServiceHelpers.plan_day_activities(
-            destination,
-            day_number,
-            total_days,
-            weather_temp_max,
-            precipitation_chance
-        )
-        
-        destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-        
-        return {
-            "destination": destination,
-            "day_number": day_number,
-            "total_days": total_days,
-            "activities": activities,
-            "weather_considerations": {
-                "temp_max": weather_temp_max,
-                "precipitation_chance": precipitation_chance
-            },
-            "destination_tips": destination_info["tips"]
-        }
-    
-    except Exception as e:
-        logger.error(f"Single day activity planning failed: {e}")
-        return {"error": str(e)}
+    """Plan activities for a single day.
 
-
-@tool
-def get_food_recommendations(destination: str) -> Dict[str, Any]:
-    """Get food and dining recommendations for a destination.
-    
     Args:
-        destination: Destination city or location
-    
+        destination: Destination city
+        day_number: Day number (1-based)
+        total_days: Total trip days
+        weather_temp_max: Max temperature
+        precipitation_chance: Rain chance 0-100
+
     Returns:
-        Dictionary with food recommendations and local specialties
+        Activities for the day
     """
-    destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-    
     return {
         "destination": destination,
-        "recommendations": destination_info["food"],
-        "count": len(destination_info["food"])
-    }
-
-
-@tool
-def get_travel_tips(destination: str) -> Dict[str, Any]:
-    """Get travel tips and advice for a destination.
-    
-    Args:
-        destination: Destination city or location
-    
-    Returns:
-        Dictionary with helpful travel tips and advice
-    """
-    destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-    
-    return {
-        "destination": destination,
-        "tips": destination_info["tips"],
-        "count": len(destination_info["tips"])
+        "day_number": day_number,
+        "note": "Full day plan generated as part of complete itinerary"
     }
 
 
 @tool
 def get_available_destinations() -> Dict[str, Any]:
-    """Get list of destinations with pre-loaded attraction information.
-    
+    """Get supported destinations info.
+
     Returns:
-        Dictionary with available destinations and their attraction counts
+        Info about destination coverage
     """
-    destinations = {}
-    
-    for city, info in ItineraryServiceHelpers.DESTINATION_ATTRACTIONS.items():
-        destinations[city.title()] = {
-            "must_visit_count": len(info["must_visit"]),
-            "optional_count": len(info["optional"]),
-            "food_recommendations": len(info["food"]),
-            "tips_count": len(info["tips"])
-        }
-    
     return {
-        "destinations": destinations,
-        "total_count": len(destinations),
-        "supported_cities": list(destinations.keys())
+        "coverage": "All destinations worldwide supported via LLM generation",
+        "note": "No hardcoded city list — plans are generated fresh for every query"
     }
-
-
-@tool
-def optimize_itinerary_by_weather(
-    destination: str,
-    travel_dates: List[str],
-    weather_data: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """Optimize itinerary based on weather forecasts to plan indoor/outdoor activities.
-    
-    Args:
-        destination: Destination city or location
-        travel_dates: List of travel dates in YYYY-MM-DD format
-        weather_data: List of weather data dictionaries for each day
-    
-    Returns:
-        Dictionary with weather-optimized daily recommendations
-    """
-    try:
-        destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-        optimized_days = []
-        
-        for i, date_str in enumerate(travel_dates):
-            day_weather = weather_data[i] if i < len(weather_data) else {}
-            
-            temp_max = day_weather.get("temp_max", 25)
-            precipitation = day_weather.get("precipitation_chance", 0)
-            
-            recommendations = []
-            
-            # Weather-based recommendations
-            if precipitation > 70:
-                recommendations.append("High chance of rain - ideal for indoor attractions")
-                recommendations.append("Visit museums, temples, or covered markets")
-            elif precipitation > 40:
-                recommendations.append("Moderate rain chance - plan flexible activities")
-                recommendations.append("Keep indoor backup options ready")
-            else:
-                recommendations.append("Good weather for outdoor sightseeing")
-            
-            if temp_max > 35:
-                recommendations.append("Very hot - visit outdoor attractions early morning or late evening")
-                recommendations.append("Stay hydrated and take breaks in air-conditioned places")
-            elif temp_max < 15:
-                recommendations.append("Cold weather - dress in layers")
-                recommendations.append("Enjoy hot local beverages")
-            
-            optimized_days.append({
-                "date": date_str,
-                "day": i + 1,
-                "weather": {
-                    "temp_max": temp_max,
-                    "precipitation_chance": precipitation,
-                    "description": day_weather.get("description", "N/A")
-                },
-                "recommendations": recommendations
-            })
-        
-        return {
-            "destination": destination,
-            "optimized_itinerary": optimized_days,
-            "total_days": len(travel_dates)
-        }
-    
-    except Exception as e:
-        logger.error(f"Itinerary optimization failed: {e}")
-        return {"error": str(e)}
 
 
 @tool
@@ -546,48 +492,25 @@ def estimate_time_per_attraction(
     destination: str,
     attraction_count: int = None
 ) -> Dict[str, Any]:
-    """Estimate time needed for attractions at a destination.
-    
+    """Estimate time needed for attractions.
+
     Args:
-        destination: Destination city or location
-        attraction_count: Optional specific number of attractions to estimate for
-    
+        destination: Destination city
+        attraction_count: Number of attractions
+
     Returns:
-        Dictionary with time estimates for visiting attractions
+        Time estimates
     """
-    destination_info = ItineraryServiceHelpers.get_destination_info(destination)
-    
-    if attraction_count is None:
-        attraction_count = len(destination_info["must_visit"])
-    
-    # Average time estimates
-    time_per_major_attraction = 2.5  # hours
-    time_per_optional_attraction = 1.5  # hours
-    travel_time_between = 0.5  # hours
-    
-    major_attractions_time = len(destination_info["must_visit"]) * time_per_major_attraction
-    optional_attractions_time = len(destination_info["optional"]) * time_per_optional_attraction
-    total_travel_time = attraction_count * travel_time_between
-    
+    count = attraction_count or 4
     return {
         "destination": destination,
-        "major_attractions": {
-            "count": len(destination_info["must_visit"]),
-            "estimated_hours": major_attractions_time,
-            "avg_per_attraction": time_per_major_attraction
-        },
-        "optional_attractions": {
-            "count": len(destination_info["optional"]),
-            "estimated_hours": optional_attractions_time,
-            "avg_per_attraction": time_per_optional_attraction
-        },
-        "travel_time_estimate": total_travel_time,
-        "recommended_days": max(1, round((major_attractions_time + total_travel_time) / 8)),
-        "notes": "Estimates assume 8 hours of sightseeing per day"
+        "estimated_hours_per_attraction": 2.0,
+        "recommended_daily_attractions": 3,
+        "notes": "Relaxed pace recommended — quality over quantity"
     }
 
 
-# ========================= TOOL LIST FOR AGENT ========================= #
+# ========================= TOOL LIST ========================= #
 
 ITINERARY_TOOLS = [
     get_destination_info,
@@ -597,5 +520,5 @@ ITINERARY_TOOLS = [
     get_travel_tips,
     get_available_destinations,
     optimize_itinerary_by_weather,
-    estimate_time_per_attraction
+    estimate_time_per_attraction,
 ]

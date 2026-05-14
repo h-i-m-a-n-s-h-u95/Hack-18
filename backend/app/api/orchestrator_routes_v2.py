@@ -117,7 +117,7 @@ async def init_orchestrator():
         
         _orchestrator = OrchestratorAgent(
             redis_client=redis_client,
-            gemini_api_key=settings.google_api_key,
+            groq_api_key=settings.groq_api_key,
             model_name=settings.model_name
         )
         logger.info("✅ Orchestrator initialized successfully with memory support")
@@ -646,7 +646,7 @@ async def websocket_streaming(websocket: WebSocket, session_id: str):
     
     **Connection:**
     ```javascript
-    const ws = new WebSocket('ws://localhost:8000/api/v2/orchestrator/ws/session_abc123');
+    const ws = new WebSocket('ws://localhost:8010/api/v2/orchestrator/ws/session_abc123');
     ```
     
     **Message Types:**

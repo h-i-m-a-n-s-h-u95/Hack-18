@@ -45,7 +45,7 @@ async def main():
         # Create weather agent instance with correct parameters
         agent = WeatherAgent(
             redis_client=redis_client,
-            gemini_api_key=settings.google_api_key,
+            groq_api_key=settings.groq_api_key,
             model_name=settings.model_name
         )
         

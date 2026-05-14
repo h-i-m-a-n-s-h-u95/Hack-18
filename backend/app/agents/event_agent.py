@@ -29,8 +29,8 @@ class EventsAgent(BaseAgent):
     def __init__(
         self,
         redis_client: RedisClient,
-        gemini_api_key: str = None,
-        model_name: str = "gemini-2.0-flash-exp"
+        groq_api_key: str = None,
+        model_name: str = "llama-3.3-70b-versatile"
     ):
         super().__init__(
             name="Buzzfinder",
@@ -39,7 +39,7 @@ class EventsAgent(BaseAgent):
             agent_type=AgentType.EVENTS,
             redis_client=redis_client,
             tools=EVENT_TOOLS,
-            gemini_api_key=gemini_api_key,
+            groq_api_key=groq_api_key,
             model_name=model_name
         )
         
@@ -416,7 +416,7 @@ async def run_events_agent_standalone():
     # Create events agent
     events_agent = EventsAgent(
         redis_client=redis_client,
-        gemini_api_key=settings.google_api_key,
+        groq_api_key=settings.groq_api_key,
         model_name=settings.model_name
     )
     

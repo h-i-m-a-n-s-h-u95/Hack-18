@@ -1,0 +1,229 @@
+version: '3.8'
+
+services:
+  # ==================== REDIS ====================
+  redis:
+    image: redis:7-alpine
+    container_name: TBuddy-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - TBuddy-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== API SERVICE ====================
+  api:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    container_name: TBuddy-api
+    ports:
+      - "8010:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - DEBUG=true
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==================== ORCHESTRATOR SERVICE ====================
+  orchestrator:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+    container_name: TBuddy-orchestrator
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - WORKER_TYPE=orchestrator
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: python -m app.workers.orchestrator_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==================== WORKER SERVICES ====================
+  
+  weather-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+    container_name: TBuddy-weather-worker
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - WORKER_TYPE=weather
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: python -m app.workers.weather_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  events-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+    container_name: TBuddy-events-worker
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - WORKER_TYPE=events
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: python -m app.workers.events_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  maps-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+    container_name: TBuddy-maps-worker
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - WORKER_TYPE=maps
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: python -m app.workers.maps_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  budget-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+    container_name: TBuddy-budget-worker
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - WORKER_TYPE=budget
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: python -m app.workers.budget_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  itinerary-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.worker
+    container_name: TBuddy-itinerary-worker
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - WORKER_TYPE=itinerary
+      - STREAMING_ENABLED=true
+      - MODEL_NAME=gemini-2.0-flash-exp
+    volumes:
+      - ./app:/app/app
+    command: python -m app.workers.itinerary_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  TBuddy-network:
+    driver: bridge

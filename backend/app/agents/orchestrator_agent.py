@@ -1,7 +1,7 @@
 from typing import Dict, Any, List, Optional, TypedDict, Annotated
 from datetime import datetime, timedelta
 from langgraph.graph import StateGraph, END
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 import asyncio
 import logging
@@ -73,20 +73,19 @@ class OrchestratorAgent:
     def __init__(
         self,
         redis_client: Optional[RedisClient] = None,
-        gemini_api_key: str = None,
-        model_name: str = "gemini-2.5-flash"
+        groq_api_key: str = None,
+        model_name: str = "llama-3.3-70b-versatile"
     ):
         self.redis_client = redis_client or get_redis_client()
         self.logger = logging.getLogger("orchestrator")
         
         # Initialize Gemini LLM
-        api_key = gemini_api_key or getattr(settings, 'google_api_key', None)
-        self.llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=api_key,
-            temperature=0.3,
-            max_output_tokens=4096
-        )
+        api_key = getattr(settings, 'groq_api_key', None)
+        self.llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    api_key=getattr(settings, 'groq_api_key', None),
+    temperature=0.3,
+)
         
         # Build LangGraph workflow
         self.graph = self._build_graph()
@@ -1289,7 +1288,7 @@ Query Type: <query_type>
 
 async def create_orchestrator(
     redis_client: Optional[RedisClient] = None,
-    gemini_api_key: Optional[str] = None
+    groq_api_key: Optional[str] = None
 ) -> OrchestratorAgent:
     """
     Create and initialize an orchestrator agent with memory support
@@ -1303,7 +1302,7 @@ async def create_orchestrator(
     """
     orchestrator = OrchestratorAgent(
         redis_client=redis_client,
-        gemini_api_key=gemini_api_key
+        groq_api_key=groq_api_key
     )
     
     # Connect Redis if not already connected
@@ -1325,7 +1324,7 @@ async def run_orchestrator_standalone():
     # Create orchestrator
     orchestrator = OrchestratorAgent(
         redis_client=redis_client,
-        gemini_api_key=settings.google_api_key
+        groq_api_key=settings.groq_api_key
     )
     
     print("🎪 Orchestrator Agent is ready!")

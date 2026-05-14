@@ -29,8 +29,8 @@ class MapsAgent(BaseAgent):
     def __init__(
         self,
         redis_client: RedisClient,
-        gemini_api_key: str = None,
-        model_name: str = "gemini-2.0-flash-exp"
+        groq_api_key: str = None,
+        model_name: str = "llama-3.3-70b-versatile"
     ):
         super().__init__(
             name="Trailblazer",
@@ -39,7 +39,7 @@ class MapsAgent(BaseAgent):
             agent_type=AgentType.MAPS,
             redis_client=redis_client,
             tools=MAPS_TOOLS,
-            gemini_api_key=gemini_api_key,
+            groq_api_key=groq_api_key,
             model_name=model_name
         )
         
@@ -399,7 +399,7 @@ async def run_maps_agent_standalone():
     # Create maps agent
     maps_agent = MapsAgent(
         redis_client=redis_client,
-        gemini_api_key=settings.google_api_key,
+        groq_api_key=settings.groq_api_key,
         model_name=settings.model_name
     )
     

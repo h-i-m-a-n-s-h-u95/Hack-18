@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional
+import re
 from datetime import datetime, timedelta
 from app.core.state import ItineraryDay, WeatherInfo, BudgetBreakdown
 import logging
@@ -7,10 +8,8 @@ logger = logging.getLogger(__name__)
 
 
 class ItineraryService:
-    """Simple itinerary planning service"""
 
     def __init__(self):
-        # Popular destinations and their main attractions
         self.destination_attractions = {
             "agra": {
                 "must_visit": [
@@ -84,20 +83,39 @@ class ItineraryService:
         }
 
     def get_destination_info(self, destination: str) -> Dict:
-        """Get attractions and tips for a destination"""
         destination_lower = destination.lower()
-
         for city, info in self.destination_attractions.items():
             if city in destination_lower:
                 return info
-
-        # Generic fallback
         return {
             "must_visit": [f"Explore main attractions in {destination}"],
             "optional": ["Visit local markets", "Try local cuisine", "Walk around city center"],
             "food": ["Try local specialties", "Visit popular restaurants"],
             "tips": ["Research local customs", "Carry water and comfortable shoes", "Keep emergency contacts handy"]
         }
+
+    def _expand_travel_dates(self, travel_dates: list) -> list:
+        """
+        Expand date range strings into individual dates.
+        ["2026-07-15 to 2026-07-18"] -> ["2026-07-15","2026-07-16","2026-07-17","2026-07-18"]
+        Already-individual dates are passed through unchanged.
+        """
+        expanded = []
+        for d in travel_dates:
+            d = d.strip()
+            range_match = re.match(
+                r'(\d{4}-\d{2}-\d{2})\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2})', d
+            )
+            if range_match:
+                start = datetime.strptime(range_match.group(1), "%Y-%m-%d")
+                end = datetime.strptime(range_match.group(2), "%Y-%m-%d")
+                cur = start
+                while cur <= end:
+                    expanded.append(cur.strftime("%Y-%m-%d"))
+                    cur += timedelta(days=1)
+            else:
+                expanded.append(d)
+        return expanded if expanded else travel_dates
 
     def create_daily_itinerary(
         self,
@@ -107,38 +125,37 @@ class ItineraryService:
         budget_data: Optional[BudgetBreakdown] = None,
         travelers_count: int = 1
     ) -> List[ItineraryDay]:
-        """Create day-by-day itinerary"""
+        """Create day-by-day itinerary — handles date range strings"""
+
+        expanded_dates = self._expand_travel_dates(travel_dates)
+
+        logger.info(
+            f"Creating itinerary: raw_dates={travel_dates}, "
+            f"expanded={expanded_dates} ({len(expanded_dates)} days)"
+        )
+
         itinerary_days = []
         destination_info = self.get_destination_info(destination)
         all_attractions = destination_info["must_visit"] + destination_info["optional"]
+        total_days = len(expanded_dates)
 
-        for i, date_str in enumerate(travel_dates):
+        for i, date_str in enumerate(expanded_dates):
             day_number = i + 1
-
-            # Weather for the day
             day_weather = weather_data[i] if weather_data and i < len(weather_data) else None
 
             activities = self._plan_day_activities(
-                day_number,
-                all_attractions,
-                destination_info,
-                day_weather,
-                len(travel_dates)
+                day_number, all_attractions, destination_info, day_weather, total_days
             )
-
-            estimated_cost = self._estimate_daily_cost(budget_data, len(travel_dates), travelers_count)
-
+            estimated_cost = self._estimate_daily_cost(budget_data, total_days, travelers_count)
             notes = self._create_day_notes(day_weather, destination_info, day_number)
 
-            itinerary_day = ItineraryDay(
+            itinerary_days.append(ItineraryDay(
                 day=day_number,
                 date=date_str,
                 activities=activities,
                 notes=notes,
                 estimated_cost=estimated_cost
-            )
-
-            itinerary_days.append(itinerary_day)
+            ))
 
         return itinerary_days
 
@@ -150,7 +167,6 @@ class ItineraryService:
         weather: Optional[WeatherInfo],
         total_days: int
     ) -> List[str]:
-        """Plan activities for a specific day"""
         activities = []
 
         if day_number == 1:
@@ -174,33 +190,38 @@ class ItineraryService:
                 food_idx = (day_number - 1) % len(destination_info["food"])
                 activities.append(destination_info["food"][food_idx])
 
-        # Weather-based adjustments
         weather_dict = self._normalize_weather(weather)
         if weather_dict.get("precipitation_chance", 0) > 70:
-            activities.append("⚠️ High chance of rain - carry umbrella")
+            activities.append("High chance of rain - carry umbrella")
         if weather_dict.get("temperature_max", 25) > 35:
-            activities.append("🌡️ Hot weather - plan indoor activities during midday")
+            activities.append("Hot weather - plan indoor activities during midday")
         if weather_dict.get("temperature_max", 25) < 15:
-            activities.append("🧥 Cold weather - dress warmly")
+            activities.append("Cold weather - dress warmly")
 
         return activities
 
     def _estimate_daily_cost(
         self,
-        budget_data: Optional[BudgetBreakdown],
+        budget_data,
         total_days: int,
         travelers_count: int
     ) -> float:
-        """Estimate cost for a single day"""
+        """Estimate cost for a single day — safe for both Pydantic models and dicts"""
         if not budget_data or total_days == 0:
-            return 1500.0  # Default daily estimate
+            return 1500.0
 
-        daily_accommodation = (getattr(budget_data, "accommodation", None) or budget_data.get("accommodation", 0)) / max(1, total_days - 1)
-        daily_food = (getattr(budget_data, "food", None) or budget_data.get("food", 0)) / total_days
-        daily_activities = (getattr(budget_data, "activities", None) or budget_data.get("activities", 0)) / total_days
+        def _get(obj, key, default=0):
+            if isinstance(obj, dict):
+                return obj.get(key, default) or default
+            return getattr(obj, key, default) or default
+
+        nights = max(1, total_days - 1)
+        daily_accommodation = _get(budget_data, "accommodation") / nights
+        daily_food = _get(budget_data, "food") / total_days
+        daily_activities = _get(budget_data, "activities") / total_days
         daily_transport = 200
 
-        return daily_accommodation + daily_food + daily_activities + daily_transport
+        return round(daily_accommodation + daily_food + daily_activities + daily_transport, 2)
 
     def _create_day_notes(
         self,
@@ -208,13 +229,14 @@ class ItineraryService:
         destination_info: Dict,
         day_number: int
     ) -> str:
-        """Create helpful notes for the day"""
         notes = []
 
         weather_dict = self._normalize_weather(weather)
         if weather_dict:
-            notes.append(f"Weather: {weather_dict.get('description', 'N/A')}, "
-                         f"{weather_dict.get('temperature_min', '?')}-{weather_dict.get('temperature_max', '?')}°C")
+            notes.append(
+                f"Weather: {weather_dict.get('description', 'N/A')}, "
+                f"{weather_dict.get('temperature_min', '?')}-{weather_dict.get('temperature_max', '?')}C"
+            )
             if weather_dict.get("precipitation_chance", 0) > 50:
                 notes.append("Chance of rain - plan indoor activities")
             if weather_dict.get("wind_speed", 0) > 15:
@@ -226,8 +248,7 @@ class ItineraryService:
 
         return " | ".join(notes) if notes else "Enjoy your day of exploration!"
 
-    def _normalize_weather(self, weather: Optional[WeatherInfo]) -> Dict[str, float]:
-        """Ensure weather data is always a dict with default values."""
+    def _normalize_weather(self, weather: Optional[WeatherInfo]) -> Dict:
         if not weather:
             return {}
         if isinstance(weather, dict):

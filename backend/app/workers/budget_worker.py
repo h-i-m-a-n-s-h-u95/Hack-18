@@ -43,7 +43,7 @@ async def main():
         # Create budget agent instance with correct parameters
         agent = BudgetAgent(
             redis_client=redis_client,
-            gemini_api_key=settings.google_api_key,
+            groq_api_key=settings.groq_api_key,
             model_name=settings.model_name
         )
         

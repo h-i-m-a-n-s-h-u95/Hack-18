@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -65,8 +65,8 @@ class BaseAgent(ABC):
         agent_type: AgentType,
         redis_client: RedisClient,
         tools: Optional[List] = None,
-        gemini_api_key: str = None,
-        model_name: str = "gemini-2.0-flash-exp"
+        groq_api_key: str = None,
+        model_name: str = "llama-3.3-70b-versatile"
     ):
         self.name = name
         self.role = role
@@ -77,14 +77,19 @@ class BaseAgent(ABC):
         
         self.logger = logging.getLogger(f"agent.{name.lower().replace(' ', '_')}")
         
-        # Initialize Gemini LLM
-        api_key = gemini_api_key or getattr(settings, 'google_api_key', None)
-        self.llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=api_key,
-            temperature=getattr(settings, 'temperature', 0.7),
-            max_output_tokens=getattr(settings, 'max_tokens', 4096)
-        )
+        
+        # Initialize Groq LLM
+
+        # Initialize Groq LLM
+        api_key = getattr(settings, 'groq_api_key', None)
+
+        self.llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    api_key=api_key,
+    temperature=getattr(settings, 'temperature', 0.7),
+)
+        
+
         
         # Bind tools to LLM if provided
         if self.tools:
