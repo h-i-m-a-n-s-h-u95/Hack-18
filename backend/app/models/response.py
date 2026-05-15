@@ -20,6 +20,7 @@ class TravelPlanResponse(BaseModel):
     itinerary: Optional[List[ItineraryDay]] = None
     errors: List[str] = []
     processing_time: Optional[float] = None
+    map_data: Optional[dict] = None
 
 
 class WeatherResponse(BaseModel):

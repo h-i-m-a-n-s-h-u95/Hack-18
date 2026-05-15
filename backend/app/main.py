@@ -17,7 +17,7 @@ from app.scripts.create_admin_key import router as admin_key_router
 from app.messaging.redis_client import get_redis_client
 from app.api import orchestrator_routes_v2
 from app.auth.middleware import APIKeyAuthMiddleware
-
+from app.api.map_routes import router as map_router
 # Configure logging
 logging.basicConfig(
     level=logging.INFO if not settings.debug else logging.DEBUG,
@@ -134,6 +134,7 @@ else:
 app.include_router(orchestrtor_routes_v2, tags=["Orchestrator-v2"])
 app.include_router(api_key_router, tags=["API Key Management"])
 app.include_router(admin_key_router, tags=["Admin Key Router"])
+app.include_router(map_router, prefix="/api/v1/map", tags=["map"])
 
 # Exception handlers
 @app.exception_handler(HTTPException)
