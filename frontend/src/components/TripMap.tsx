@@ -1,17 +1,6 @@
 "use client";
-/**
- * TripMap.tsx — Fixed Leaflet map for Ringmaster Round Table
- *
- * Fixes applied:
- *  1. Leaflet CSS imported via next/head (required for map to render correctly)
- *  2. Map init no longer re-runs on activeMode change — polyline layers are
- *     stored in a ref and toggled in place instead of rebuilding the map.
- *  3. apiBaseUrl defaults match the WS port (8010) used in TravelChatPage.
- *  4. Cleanup on unmount is guarded with isMounted flag.
- */
 
 import { useEffect, useRef, useState } from "react";
-import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -25,6 +14,8 @@ interface RoutePolyline {
 interface MapsData {
   origin?: string;
   destination?: string;
+  origin_city?: string;
+  destination_city?: string;
   origin_coords?: Coord;
   destination_coords?: Coord;
   polyline?: Coord[];
@@ -39,43 +30,49 @@ interface TripMapProps {
   itineraryDays?: ItineraryDay[];
   origin?: string;
   destination?: string;
-  /** Should match the port your FastAPI app runs on */
   apiBaseUrl?: string;
 }
 
-// ── Colour helpers ────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const MODE_COLOURS: Record<string, string> = {
-  driving: "#a78bfa",
-  walking: "#34d399",
-  cycling: "#fb923c",
-  default: "#818cf8",
+  driving: "#a78bfa", walking: "#34d399", cycling: "#fb923c", default: "#818cf8",
 };
-function modeColour(mode?: string) {
-  return MODE_COLOURS[(mode ?? "").toLowerCase()] ?? MODE_COLOURS.default;
-}
-function modeEmoji(mode?: string) {
+const modeColour = (mode?: string) =>
+  MODE_COLOURS[(mode ?? "").toLowerCase()] ?? MODE_COLOURS.default;
+
+const modeEmoji = (mode?: string) => {
   const m = (mode ?? "").toLowerCase();
-  if (m.includes("walk"))  return "🚶";
+  if (m.includes("walk")) return "🚶";
   if (m.includes("cycl") || m.includes("bike")) return "🚲";
   if (m.includes("train")) return "🚂";
   if (m.includes("flight") || m.includes("air")) return "✈️";
   return "🚗";
-}
+};
 
-// ── SVG marker (no external image dependency) ─────────────────────────────────
-function makeMarkerSvg(label: string, colour: string): string {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="44" viewBox="0 0 36 44">
+const makeMarkerSvg = (label: string, colour: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="44" viewBox="0 0 36 44">
     <ellipse cx="18" cy="41" rx="7" ry="3" fill="rgba(0,0,0,0.25)"/>
     <path d="M18 2C9.2 2 2 9.2 2 18C2 28 18 42 18 42C18 42 34 28 34 18C34 9.2 26.8 2 18 2Z"
       fill="${colour}" stroke="rgba(255,255,255,0.6)" stroke-width="1.5"/>
     <text x="18" y="22" text-anchor="middle" dominant-baseline="middle"
-      font-family="system-ui,sans-serif" font-size="11" font-weight="700" fill="white">${label}</text>
+      font-family="system-ui,sans-serif" font-size="11" font-weight="700"
+      fill="white">${label}</text>
   </svg>`;
+
+// ── Inject Leaflet CSS once into <head> via DOM (App Router safe) ─────────────
+function ensureLeafletCSS() {
+  const id = "leaflet-css";
+  if (document.getElementById(id)) return;
+  const link = document.createElement("link");
+  link.id   = id;
+  link.rel  = "stylesheet";
+  link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+  link.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=";
+  link.crossOrigin = "";
+  document.head.appendChild(link);
 }
 
-// ── Stored layer refs (keyed by mode) ──────────────────────────────────────────
 type PolylineLayer = import("leaflet").Polyline;
-type LayerMap = Record<string, PolylineLayer>;
 
 // ══════════════════════════════════════════════════════════════════════════════
 export default function TripMap({
@@ -83,17 +80,15 @@ export default function TripMap({
   itineraryDays = [],
   origin,
   destination,
-  // FIX 3: default port matches TravelChatPage WebSocket (8010)
   apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010",
 }: TripMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef          = useRef<import("leaflet").Map | null>(null);
-  // FIX 2: store polyline layers so we can toggle them without rebuilding the map
-  const layersRef       = useRef<LayerMap>({});
+  const layersRef       = useRef<Record<string, PolylineLayer>>({});
 
-  const [activeMode,  setActiveMode]  = useState<string>("primary");
-  const [isLoading,   setIsLoading]   = useState(true);
-  const [error,       setError]       = useState<string | null>(null);
+  const [activeMode, setActiveMode] = useState("primary");
+  const [isLoading,  setIsLoading]  = useState(true);
+  const [error,      setError]      = useState<string | null>(null);
   const [mapData, setMapData] = useState<{
     originCoord?: Coord;
     destCoord?: Coord;
@@ -103,7 +98,11 @@ export default function TripMap({
     primaryMeta: { distance?: string; duration?: string; transport_mode?: string };
   } | null>(null);
 
-  // ── Step 1: Fetch / derive map data (runs once on mount) ─────────────────
+  // Resolve origin/destination from every possible field the backend might send
+  const resolvedOrigin = (origin || mapsData?.origin || mapsData?.origin_city || "").trim();
+  const resolvedDest   = (destination || mapsData?.destination || mapsData?.destination_city || "").trim();
+
+  // ── Step 1: fetch map data ────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
@@ -111,18 +110,15 @@ export default function TripMap({
       setIsLoading(true);
       setError(null);
 
+      if (!resolvedOrigin || !resolvedDest) {
+        setError(`Origin/destination missing — got "${resolvedOrigin}" → "${resolvedDest}"`);
+        setIsLoading(false);
+        return;
+      }
+
       try {
-        const fromName = origin ?? mapsData.origin ?? "";
-        const toName   = destination ?? mapsData.destination ?? "";
-
-        if (!fromName || !toName) {
-          setError("Origin or destination missing");
-          setIsLoading(false);
-          return;
-        }
-
-        // If the backend already shipped a polyline, use it directly
-        if (mapsData.polyline && mapsData.polyline.length > 2) {
+        // Use pre-built polyline from backend if present
+        if (mapsData?.polyline && mapsData.polyline.length > 2) {
           if (!cancelled) {
             setMapData({
               originCoord:     mapsData.origin_coords,
@@ -136,29 +132,31 @@ export default function TripMap({
           return;
         }
 
-        // Otherwise call the dedicated map endpoint
-        const res = await fetch(`${apiBaseUrl}/api/v1/map/data`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            origin:         fromName,
-            destination:    toName,
-            transport_mode: mapsData.recommended_mode
-                              ?? mapsData.primary_route?.transport_mode
-                              ?? "driving",
-          }),
-        });
+        const body = {
+          origin:         resolvedOrigin,
+          destination:    resolvedDest,
+          transport_mode: mapsData?.recommended_mode
+                            ?? mapsData?.primary_route?.transport_mode
+                            ?? "driving",
+        };
 
-        if (!res.ok) throw new Error(`Map API ${res.status}: ${res.statusText}`);
+        const res  = await fetch(`${apiBaseUrl}/api/v1/map/data`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify(body),
+        });
         const json = await res.json();
-        if (!json.success) throw new Error(json.error ?? "Map data failed");
+
+        if (!res.ok || !json.success) {
+          throw new Error(json.error ?? `Map API returned ${res.status}`);
+        }
 
         const altPolylines: Record<string, Coord[]> = {};
         const altMeta: Record<string, { distance?: string; duration?: string }> = {};
         for (const [mode, poly] of Object.entries(json.alternative_routes ?? {})) {
           const p = poly as RoutePolyline;
           altPolylines[mode] = p.coordinates ?? [];
-          altMeta[mode] = { distance: p.distance, duration: p.duration };
+          altMeta[mode]      = { distance: p.distance, duration: p.duration };
         }
 
         if (!cancelled) {
@@ -186,21 +184,23 @@ export default function TripMap({
     load();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty — re-run only if parent remounts
+  }, [resolvedOrigin, resolvedDest]);
 
-  // ── Step 2: Initialise Leaflet map (runs once when mapData is ready) ──────
-  // FIX 2: activeMode is NOT in the dep array — toggling mode no longer
-  //         rebuilds the map.  We draw ALL polylines once, then show/hide them.
+  // ── Step 2: init Leaflet once mapData is ready ────────────────────────────
   useEffect(() => {
     if (!mapData || !mapContainerRef.current) return;
     let isMounted = true;
 
     async function initMap() {
-      // FIX 1: import leaflet CSS dynamically so Next.js doesn't SSR it
-      await import("leaflet/dist/leaflet.css");
+      // FIX: inject CSS via DOM instead of <Head> (App Router compatible)
+      ensureLeafletCSS();
+
+      // Small delay so the CSS link can be parsed before Leaflet renders
+      await new Promise(r => setTimeout(r, 80));
+
       const L = (await import("leaflet")).default;
 
-      // Fix Leaflet's broken default icon URLs under webpack
+      // Fix broken default icon paths under webpack/Next.js
       // @ts-expect-error private internals
       delete L.Icon.Default.prototype._getIconUrl;
       L.Icon.Default.mergeOptions({
@@ -211,7 +211,6 @@ export default function TripMap({
 
       if (!isMounted || !mapContainerRef.current) return;
 
-      // Destroy any previous instance (e.g. React StrictMode double-mount)
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
@@ -235,7 +234,6 @@ export default function TripMap({
 
       const bounds: [number, number][] = [];
 
-      // ── Helper to add a divIcon marker ────────────────────────────────────
       const addMarker = (coord: Coord, label: string, colour: string, popup: string) => {
         const icon = L.divIcon({
           html: makeMarkerSvg(label, colour),
@@ -248,44 +246,38 @@ export default function TripMap({
         bounds.push([coord.lat, coord.lng]);
       };
 
-      // ── Primary polyline (stored under "primary" key) ─────────────────────
+      // Primary polyline
       if (mapData.primaryPolyline.length > 1) {
         const latlngs = mapData.primaryPolyline.map(c => [c.lat, c.lng] as [number, number]);
         const pl = L.polyline(latlngs, {
-          color:   modeColour(mapData.primaryMeta.transport_mode),
-          weight:  5,
-          opacity: 0.9,
-          lineCap: "round",
-          lineJoin: "round",
+          color: modeColour(mapData.primaryMeta.transport_mode),
+          weight: 5, opacity: 0.9, lineCap: "round", lineJoin: "round",
         }).addTo(map);
         layersRef.current["primary"] = pl;
         bounds.push(...latlngs);
       }
 
-      // ── Alternative polylines ─────────────────────────────────────────────
+      // Alternative polylines (dimmed)
       for (const [mode, coords] of Object.entries(mapData.altPolylines)) {
         if (coords.length < 2) continue;
         const latlngs = coords.map(c => [c.lat, c.lng] as [number, number]);
         const pl = L.polyline(latlngs, {
-          color:     modeColour(mode),
-          weight:    3,
-          opacity:   0.3,       // dimmed by default
-          dashArray: "8 6",
-          lineCap:   "round",
+          color: modeColour(mode), weight: 3, opacity: 0.3,
+          dashArray: "8 6", lineCap: "round",
         }).addTo(map);
         layersRef.current[mode] = pl;
       }
 
-      // ── Origin / destination markers ──────────────────────────────────────
+      // Markers
       if (mapData.originCoord)
         addMarker(mapData.originCoord, "A", "#f59e0b",
-          `<b>${mapData.originCoord.label ?? origin ?? "Origin"}</b><br/>Start`);
+          `<b>${mapData.originCoord.label ?? resolvedOrigin}</b><br/>Start`);
 
       if (mapData.destCoord)
         addMarker(mapData.destCoord, "B", "#ef4444",
-          `<b>${mapData.destCoord.label ?? destination ?? "Destination"}</b><br/>End`);
+          `<b>${mapData.destCoord.label ?? resolvedDest}</b><br/>End`);
 
-      // ── Itinerary day markers (best-effort geocode) ───────────────────────
+      // Day stop markers (best-effort geocode)
       const dayPlaces = itineraryDays
         .map(day => {
           const place = day.activities.find(a => a.length < 60 && !/[.?!]$/.test(a));
@@ -312,13 +304,13 @@ export default function TripMap({
         })
       );
 
-      // ── Fit bounds ────────────────────────────────────────────────────────
+      // Fit bounds
       if (bounds.length > 1) {
         map.fitBounds(bounds, { padding: [48, 48], maxZoom: 13 });
       } else if (bounds.length === 1) {
         map.setView(bounds[0], 10);
       } else {
-        map.setView([20, 0], 2);
+        map.setView([20, 77], 5); // fallback: India
       }
 
       mapRef.current = map;
@@ -327,20 +319,18 @@ export default function TripMap({
     initMap();
     return () => { isMounted = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapData]); // only re-init when data changes, NOT when activeMode changes
+  }, [mapData]);
 
-  // ── Step 3: Toggle polyline opacity when activeMode changes ───────────────
-  // FIX 2 continued: no map re-build, just restyle the existing layers
+  // ── Step 3: toggle polyline styles on mode change ─────────────────────────
   useEffect(() => {
-    const layers = layersRef.current;
-    for (const [mode, layer] of Object.entries(layers)) {
-      const isActive = mode === activeMode;
+    for (const [mode, layer] of Object.entries(layersRef.current)) {
+      const active = mode === activeMode;
       layer.setStyle({
-        weight:  isActive ? 5 : 3,
-        opacity: isActive ? 0.9 : 0.25,
-        dashArray: isActive ? "" : "8 6",
+        weight:    active ? 5 : 3,
+        opacity:   active ? 0.9 : 0.25,
+        dashArray: active ? "" : "8 6",
       });
-      if (isActive) layer.bringToFront();
+      if (active) layer.bringToFront();
     }
   }, [activeMode]);
 
@@ -354,158 +344,137 @@ export default function TripMap({
   }, []);
 
   // ── Derived display values ────────────────────────────────────────────────
-  const primaryMode = mapsData.primary_route?.transport_mode
-                   ?? mapsData.recommended_mode
-                   ?? "driving";
-  const altModes = Object.keys(mapsData.alternative_routes ?? {});
-  const allModes = ["primary", ...altModes];
-
-  const activeMeta =
-    activeMode === "primary"
-      ? mapData?.primaryMeta
-      : { ...(mapData?.altMeta?.[activeMode] ?? {}), transport_mode: activeMode };
+  const primaryMode = mapsData?.primary_route?.transport_mode ?? mapsData?.recommended_mode ?? "driving";
+  const altModes    = Object.keys(mapsData?.alternative_routes ?? {});
+  const allModes    = ["primary", ...altModes];
+  const activeMeta  = activeMode === "primary"
+    ? mapData?.primaryMeta
+    : { ...(mapData?.altMeta?.[activeMode] ?? {}), transport_mode: activeMode };
 
   return (
-    <>
-      {/* FIX 1: Leaflet CSS loaded via <Head> — critical for correct rendering */}
-      <Head>
-        <link
-          rel="stylesheet"
-          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-          crossOrigin=""
-        />
-      </Head>
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4 }}
+      className="mb-6"
+    >
+      {/*
+        FIX: removed overflow-hidden from the outer wrapper — it was clipping
+        the Leaflet tile layer and making the map appear blank.
+        Border-radius is applied only to header/footer, not the map canvas.
+      */}
+      <div className="bg-zinc-950 border border-violet-500/20 shadow-2xl rounded-3xl">
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="mb-6"
-      >
-        <div className="rounded-3xl overflow-hidden bg-zinc-950 border border-violet-500/20 shadow-2xl">
-
-          {/* ── Header ───────────────────────────────────────────────────── */}
-          <div className="px-6 py-5 bg-gradient-to-r from-violet-900/40 to-fuchsia-900/40 border-b border-violet-500/20">
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-violet-500/20 rounded-xl">
-                  <span className="text-2xl">🗺️</span>
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">Route Map</h3>
-                  {mapsData.origin && mapsData.destination && (
-                    <p className="text-sm text-violet-300">
-                      {mapsData.origin} → {mapsData.destination}
-                    </p>
-                  )}
-                </div>
+        {/* Header */}
+        <div className="px-6 py-5 bg-gradient-to-r from-violet-900/40 to-fuchsia-900/40 border-b border-violet-500/20 rounded-t-3xl">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-violet-500/20 rounded-xl">
+                <span className="text-2xl">🗺️</span>
               </div>
-
-              {/* Mode switcher pills */}
-              <div className="flex gap-2 flex-wrap">
-                {allModes.map(mode => {
-                  const isActive = activeMode === mode;
-                  const colour   = mode === "primary" ? modeColour(primaryMode) : modeColour(mode);
-                  const label    = mode === "primary" ? primaryMode : mode;
-                  return (
-                    <button
-                      key={mode}
-                      onClick={() => setActiveMode(mode)}
-                      style={{
-                        borderColor: isActive ? colour : "transparent",
-                        color: isActive ? colour : "#a1a1aa",
-                      }}
-                      className="px-3 py-1.5 rounded-full text-xs font-semibold border-2 transition-all bg-black/30 hover:bg-black/50"
-                    >
-                      {modeEmoji(label)} {label}
-                      {mode === "primary" && (
-                        <span className="ml-1.5 text-[10px] bg-violet-500/30 text-violet-200 px-1.5 py-0.5 rounded-full">
-                          best
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {mapsData.route_analysis && (
-              <p className="mt-3 text-sm text-zinc-300 bg-black/20 rounded-xl px-4 py-3 border border-violet-500/10 leading-relaxed">
-                {mapsData.route_analysis}
-              </p>
-            )}
-          </div>
-
-          {/* ── Map canvas ───────────────────────────────────────────────── */}
-          <div className="relative" style={{ height: "420px" }}>
-            <AnimatePresence>
-              {isLoading && (
-                <motion.div
-                  key="loader"
-                  initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                  className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/90 gap-4"
-                >
-                  <motion.div
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 1.4, repeat: Infinity, ease: "linear" }}
-                    className="w-10 h-10 border-4 border-violet-800 border-t-violet-400 rounded-full"
-                  />
-                  <p className="text-sm text-violet-300">Loading map…</p>
-                </motion.div>
-              )}
-              {error && !isLoading && (
-                <motion.div
-                  key="error"
-                  initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                  className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/90 gap-3 px-8 text-center"
-                >
-                  <span className="text-3xl">🗺️</span>
-                  <p className="text-zinc-400 text-sm">{error}</p>
-                  <p className="text-zinc-600 text-xs">Route info is shown in the card above.</p>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Leaflet attaches here */}
-            <div ref={mapContainerRef} className="w-full h-full" />
-          </div>
-
-          {/* ── Stats footer ─────────────────────────────────────────────── */}
-          <div className="px-6 py-4 bg-zinc-900/60 border-t border-violet-500/10">
-            <div className="flex flex-wrap items-center gap-6">
-              {activeMeta?.distance && (
-                <div className="flex items-center gap-2">
-                  <span className="text-violet-400 text-sm">📍</span>
-                  <span className="text-white font-semibold text-sm">{activeMeta.distance}</span>
-                  <span className="text-zinc-500 text-xs">distance</span>
-                </div>
-              )}
-              {activeMeta?.duration && (
-                <div className="flex items-center gap-2">
-                  <span className="text-violet-400 text-sm">⏱️</span>
-                  <span className="text-white font-semibold text-sm">{activeMeta.duration}</span>
-                  <span className="text-zinc-500 text-xs">travel time</span>
-                </div>
-              )}
-              <div className="ml-auto flex items-center gap-4 text-xs text-zinc-600">
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-3 rounded-full bg-amber-400" />Origin
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-3 rounded-full bg-red-500" />Destination
-                </span>
-                {itineraryDays.length > 0 && (
-                  <span className="flex items-center gap-1">
-                    <span className="inline-block w-3 h-3 rounded-full bg-violet-500" />Day stops
-                  </span>
+              <div>
+                <h3 className="text-lg font-bold text-white">Route Map</h3>
+                {(resolvedOrigin || resolvedDest) && (
+                  <p className="text-sm text-violet-300">{resolvedOrigin} → {resolvedDest}</p>
                 )}
               </div>
             </div>
+
+            {/* Mode pills */}
+            <div className="flex gap-2 flex-wrap">
+              {allModes.map(mode => {
+                const active = activeMode === mode;
+                const colour = mode === "primary" ? modeColour(primaryMode) : modeColour(mode);
+                const label  = mode === "primary" ? primaryMode : mode;
+                return (
+                  <button key={mode} onClick={() => setActiveMode(mode)}
+                    style={{ borderColor: active ? colour : "transparent", color: active ? colour : "#a1a1aa" }}
+                    className="px-3 py-1.5 rounded-full text-xs font-semibold border-2 transition-all bg-black/30 hover:bg-black/50">
+                    {modeEmoji(label)} {label}
+                    {mode === "primary" && (
+                      <span className="ml-1.5 text-[10px] bg-violet-500/30 text-violet-200 px-1.5 py-0.5 rounded-full">
+                        best
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
+          {mapsData?.route_analysis && (
+            <p className="mt-3 text-sm text-zinc-300 bg-black/20 rounded-xl px-4 py-3 border border-violet-500/10 leading-relaxed">
+              {mapsData.route_analysis}
+            </p>
+          )}
         </div>
-      </motion.div>
-    </>
+
+        {/* Map canvas — position:relative so the overlay can sit on top */}
+        <div style={{ position: "relative", height: "420px" }}>
+
+          {/* Loading / error overlays */}
+          <AnimatePresence>
+            {isLoading && (
+              <motion.div key="loader"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                style={{ position: "absolute", inset: 0, zIndex: 1000 }}
+                className="flex flex-col items-center justify-center bg-zinc-950/90 gap-4">
+                <motion.div animate={{ rotate: 360 }}
+                  transition={{ duration: 1.4, repeat: Infinity, ease: "linear" }}
+                  className="w-10 h-10 border-4 border-violet-800 border-t-violet-400 rounded-full" />
+                <p className="text-sm text-violet-300">Loading map…</p>
+              </motion.div>
+            )}
+            {error && !isLoading && (
+              <motion.div key="error"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                style={{ position: "absolute", inset: 0, zIndex: 1000 }}
+                className="flex flex-col items-center justify-center bg-zinc-950/90 gap-3 px-8 text-center">
+                <span className="text-3xl">🗺️</span>
+                <p className="text-zinc-400 text-sm">{error}</p>
+                <p className="text-zinc-600 text-xs">Route info is shown in the card above.</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Leaflet mounts here — explicit px height is required */}
+          <div ref={mapContainerRef} style={{ width: "100%", height: "420px" }} />
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 bg-zinc-900/60 border-t border-violet-500/10 rounded-b-3xl">
+          <div className="flex flex-wrap items-center gap-6">
+            {activeMeta?.distance && (
+              <div className="flex items-center gap-2">
+                <span className="text-violet-400 text-sm">📍</span>
+                <span className="text-white font-semibold text-sm">{activeMeta.distance}</span>
+                <span className="text-zinc-500 text-xs">distance</span>
+              </div>
+            )}
+            {activeMeta?.duration && (
+              <div className="flex items-center gap-2">
+                <span className="text-violet-400 text-sm">⏱️</span>
+                <span className="text-white font-semibold text-sm">{activeMeta.duration}</span>
+                <span className="text-zinc-500 text-xs">travel time</span>
+              </div>
+            )}
+            <div className="ml-auto flex items-center gap-4 text-xs text-zinc-600">
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-3 rounded-full bg-amber-400" /> Origin
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-3 rounded-full bg-red-500" /> Destination
+              </span>
+              {itineraryDays.length > 0 && (
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded-full bg-violet-500" /> Day stops
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </motion.div>
   );
 }

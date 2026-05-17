@@ -53,6 +53,7 @@ async def generate_llm_itinerary(
     events_data: Optional[List[Dict]],
     maps_data: Optional[Dict],
     budget_data: Optional[Dict],
+    groq_api_key: Optional[str] = None,  # ← accept key directly from agent
 ) -> List[Dict]:
     """
     Call Groq API to generate a fully personalized day-by-day itinerary.
@@ -61,15 +62,26 @@ async def generate_llm_itinerary(
     total_days = len(travel_dates)
     daily_budget = round(budget_total / total_days, 0) if budget_total and total_days else 2000
 
+    # ── Resolve API key: prefer passed-in key, fall back to env ──────────────
+    api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
+
+    logger.info(f"[Itinerary] generate_llm_itinerary called for {destination} ({total_days} days)")
+    logger.info(f"[Itinerary] API key present: {bool(api_key)}, prefix: {api_key[:8] if api_key else 'NONE'}")
+
+    if not api_key:
+        logger.error("[Itinerary] No Groq API key available — check settings.groq_api_key or GROQ_API_KEY env var")
+        return _fallback_itinerary(destination, travel_dates, daily_budget)
+
     # ── Format weather ────────────────────────────────────────────────────────
     weather_text = ""
     if weather_data:
         for i, w in enumerate(weather_data[:total_days]):
             if isinstance(w, dict):
+                tmin = w.get('temperature_min') or w.get('temp_min', '?')
+                tmax = w.get('temperature_max') or w.get('temp_max', '?')
                 weather_text += (
                     f"  Day {i+1} ({travel_dates[i] if i < len(travel_dates) else ''}): "
-                    f"{w.get('description', 'N/A')}, "
-                    f"{w.get('temperature_min', '?')}-{w.get('temperature_max', '?')}C, "
+                    f"{w.get('description', 'N/A')}, {tmin}-{tmax}C, "
                     f"rain {w.get('precipitation_chance', '?')}%\n"
                 )
 
@@ -87,15 +99,15 @@ async def generate_llm_itinerary(
     transport_text = ""
     if maps_data and isinstance(maps_data, dict):
         primary = maps_data.get("primary_route", {})
-        if isinstance(primary, dict):
+        if isinstance(primary, dict) and (primary.get("distance") or primary.get("duration")):
             transport_text = (
-                f"  {primary.get('transport_mode', 'N/A')}: "
+                f"  {primary.get('transport_mode', 'driving')}: "
                 f"{primary.get('distance', '?')}, {primary.get('duration', '?')}"
             )
         alts = maps_data.get("alternative_routes", {})
         if isinstance(alts, dict):
             for mode, info in alts.items():
-                if isinstance(info, dict):
+                if isinstance(info, dict) and (info.get("distance") or info.get("duration")):
                     transport_text += (
                         f"\n  {mode}: {info.get('distance','?')}, {info.get('duration','?')}"
                     )
@@ -120,7 +132,7 @@ TRIP DETAILS:
 - Origin: {origin}
 - Dates: {dates_str} ({total_days} days)
 - Travelers: {travelers_count} adults
-- Budget: {budget_range or 'moderate'} (~INR {budget_total or 'unspecified'} total, ~INR {daily_budget}/day)
+- Budget: {budget_range or 'moderate'} (~INR {int(budget_total) if budget_total else 'unspecified'} total, ~INR {int(daily_budget)}/day)
 - Preferences: {user_preferences or 'historical places, local markets, authentic local food, relaxed pace'}
 
 WEATHER FORECAST:
@@ -164,17 +176,14 @@ Respond with ONLY this JSON structure:
   }}
 ]"""
 
-    groq_api_key = os.environ.get("GROQ_API_KEY", "")
-    if not groq_api_key:
-        logger.warning("GROQ_API_KEY not set, using fallback itinerary")
-        return _fallback_itinerary(destination, travel_dates, daily_budget)
+    logger.info(f"[Itinerary] Sending request to Groq, prompt length: {len(prompt)} chars")
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {groq_api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
@@ -194,11 +203,14 @@ Respond with ONLY this JSON structure:
                 },
             )
 
+        logger.info(f"[Itinerary] Groq response status: {response.status_code}")
+
         if response.status_code != 200:
-            logger.error(f"Groq API error: {response.status_code} {response.text[:300]}")
+            logger.error(f"[Itinerary] Groq API error: {response.status_code} {response.text[:500]}")
             return _fallback_itinerary(destination, travel_dates, daily_budget)
 
         raw = response.json()["choices"][0]["message"]["content"].strip()
+        logger.info(f"[Itinerary] Groq raw response ({len(raw)} chars): {raw[:200]}")
 
         # Strip accidental markdown fences
         raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
@@ -206,30 +218,33 @@ Respond with ONLY this JSON structure:
         raw = re.sub(r'\s*```$', '', raw, flags=re.MULTILINE)
         raw = raw.strip()
 
+        # Find JSON array in case Groq adds preamble text
+        array_match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if array_match:
+            raw = array_match.group(0)
+
         days = json.loads(raw)
 
         if not isinstance(days, list) or len(days) == 0:
-            raise ValueError(f"Invalid response shape: {type(days)}")
+            raise ValueError(f"Expected non-empty list, got: {type(days)}")
 
-        # Ensure correct number of days
-        if len(days) != total_days:
-            logger.warning(
-                f"Groq returned {len(days)} days, expected {total_days}. "
-                f"Patching with fallback for missing days."
-            )
-            # Patch missing days if short
-            while len(days) < total_days:
-                i = len(days)
-                days.append(_fallback_day(destination, i + 1, travel_dates[i], daily_budget))
+        # Pad if Groq returned fewer days than expected
+        while len(days) < total_days:
+            i = len(days)
+            days.append(_fallback_day(destination, i + 1, travel_dates[i] if i < len(travel_dates) else "", daily_budget))
+            logger.warning(f"[Itinerary] Padded missing day {i+1}")
 
-        logger.info(f"Groq itinerary: {len(days)} days for {destination}")
+        logger.info(f"[Itinerary] Successfully generated {len(days)} days for {destination}")
         return days
 
+    except httpx.TimeoutException:
+        logger.error("[Itinerary] Groq request timed out after 90s")
+        return _fallback_itinerary(destination, travel_dates, daily_budget)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error from Groq: {e}\nRaw: {raw[:500]}")
+        logger.error(f"[Itinerary] JSON parse error: {e} | Raw: {raw[:500]}")
         return _fallback_itinerary(destination, travel_dates, daily_budget)
     except Exception as e:
-        logger.error(f"Groq itinerary generation failed: {e}")
+        logger.error(f"[Itinerary] Groq call failed: {type(e).__name__}: {e}")
         return _fallback_itinerary(destination, travel_dates, daily_budget)
 
 
@@ -243,15 +258,8 @@ def _fallback_day(destination: str, day_num: int, date: str, daily_budget: float
     }
 
 
-def _fallback_itinerary(
-    destination: str,
-    travel_dates: List[str],
-    daily_budget: float
-) -> List[Dict]:
-    return [
-        _fallback_day(destination, i + 1, date, daily_budget)
-        for i, date in enumerate(travel_dates)
-    ]
+def _fallback_itinerary(destination: str, travel_dates: List[str], daily_budget: float) -> List[Dict]:
+    return [_fallback_day(destination, i + 1, d, daily_budget) for i, d in enumerate(travel_dates)]
 
 
 # ========================= LANGCHAIN TOOLS ========================= #
@@ -294,18 +302,15 @@ def create_daily_itinerary(
     """
     import asyncio
 
-    # Expand date ranges
     expanded_dates = expand_travel_dates(travel_dates)
-
-    logger.info(
-        f"create_daily_itinerary tool: raw={travel_dates} -> "
-        f"expanded={expanded_dates} ({len(expanded_dates)} days)"
-    )
+    logger.info(f"create_daily_itinerary tool: raw={travel_dates} -> expanded={expanded_dates} ({len(expanded_dates)} days)")
 
     total_days = len(expanded_dates)
     daily_budget = round(budget_total / total_days, 0) if budget_total and total_days else 2000
 
-    # Run async LLM call from sync context
+    # NOTE: this tool path does NOT have access to self.groq_api_key.
+    # It relies on GROQ_API_KEY env var. The agent's handle_request calls
+    # generate_llm_itinerary directly with the key, which is the preferred path.
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -314,34 +319,24 @@ def create_daily_itinerary(
                 future = pool.submit(
                     asyncio.run,
                     generate_llm_itinerary(
-                        destination=destination,
-                        origin="",
-                        travel_dates=expanded_dates,
-                        travelers_count=travelers_count,
-                        budget_total=budget_total,
-                        budget_range=None,
-                        user_preferences=None,
-                        weather_data=weather_data,
-                        events_data=None,
-                        maps_data=None,
-                        budget_data=None,
+                        destination=destination, origin="",
+                        travel_dates=expanded_dates, travelers_count=travelers_count,
+                        budget_total=budget_total, budget_range=None,
+                        user_preferences=None, weather_data=weather_data,
+                        events_data=None, maps_data=None, budget_data=None,
+                        groq_api_key=None,  # will fall back to env var
                     )
                 )
                 days = future.result(timeout=90)
         else:
             days = loop.run_until_complete(
                 generate_llm_itinerary(
-                    destination=destination,
-                    origin="",
-                    travel_dates=expanded_dates,
-                    travelers_count=travelers_count,
-                    budget_total=budget_total,
-                    budget_range=None,
-                    user_preferences=None,
-                    weather_data=weather_data,
-                    events_data=None,
-                    maps_data=None,
-                    budget_data=None,
+                    destination=destination, origin="",
+                    travel_dates=expanded_dates, travelers_count=travelers_count,
+                    budget_total=budget_total, budget_range=None,
+                    user_preferences=None, weather_data=weather_data,
+                    events_data=None, maps_data=None, budget_data=None,
+                    groq_api_key=None,
                 )
             )
     except Exception as e:
@@ -349,12 +344,9 @@ def create_daily_itinerary(
         days = _fallback_itinerary(destination, expanded_dates, daily_budget)
 
     return {
-        "destination": destination,
-        "travelers_count": travelers_count,
-        "total_days": total_days,
-        "start_date": expanded_dates[0],
-        "end_date": expanded_dates[-1],
-        "itinerary": days,
+        "destination": destination, "travelers_count": travelers_count,
+        "total_days": total_days, "start_date": expanded_dates[0],
+        "end_date": expanded_dates[-1], "itinerary": days,
         "total_estimated_cost": budget_total or daily_budget * total_days,
         "currency": "INR"
     }
@@ -378,41 +370,27 @@ def optimize_itinerary_by_weather(
     """
     expanded_dates = expand_travel_dates(travel_dates)
     optimized_days = []
-
     for i, date_str in enumerate(expanded_dates):
         day_weather = weather_data[i] if i < len(weather_data) else {}
-        temp_max = day_weather.get("temp_max", 25)
+        temp_max = day_weather.get("temperature_max") or day_weather.get("temp_max", 25)
         precipitation = day_weather.get("precipitation_chance", 0)
         recommendations = []
-
         if precipitation > 70:
             recommendations.append("High rain chance - prioritize indoor attractions")
         elif precipitation > 40:
             recommendations.append("Moderate rain - keep umbrella handy")
         else:
             recommendations.append("Good weather for outdoor sightseeing")
-
         if temp_max > 35:
             recommendations.append("Very hot - outdoor visits before 11 AM or after 4 PM")
         elif temp_max < 15:
             recommendations.append("Cold - dress in layers")
-
         optimized_days.append({
-            "date": date_str,
-            "day": i + 1,
-            "weather": {
-                "temp_max": temp_max,
-                "precipitation_chance": precipitation,
-                "description": day_weather.get("description", "N/A")
-            },
+            "date": date_str, "day": i + 1,
+            "weather": {"temp_max": temp_max, "precipitation_chance": precipitation, "description": day_weather.get("description", "N/A")},
             "recommendations": recommendations
         })
-
-    return {
-        "destination": destination,
-        "optimized_itinerary": optimized_days,
-        "total_days": len(expanded_dates)
-    }
+    return {"destination": destination, "optimized_itinerary": optimized_days, "total_days": len(expanded_dates)}
 
 
 @tool
@@ -425,10 +403,7 @@ def get_food_recommendations(destination: str) -> Dict[str, Any]:
     Returns:
         Food recommendations note
     """
-    return {
-        "destination": destination,
-        "note": "Specific restaurant recommendations will be included in the LLM-generated itinerary"
-    }
+    return {"destination": destination, "note": "Specific restaurant recommendations included in the LLM-generated itinerary"}
 
 
 @tool
@@ -441,19 +416,13 @@ def get_travel_tips(destination: str) -> Dict[str, Any]:
     Returns:
         Travel tips note
     """
-    return {
-        "destination": destination,
-        "note": "Practical tips will be included per-day in the generated itinerary"
-    }
+    return {"destination": destination, "note": "Practical tips included per-day in the generated itinerary"}
 
 
 @tool
 def plan_single_day_activities(
-    destination: str,
-    day_number: int,
-    total_days: int,
-    weather_temp_max: Optional[float] = None,
-    precipitation_chance: Optional[float] = None
+    destination: str, day_number: int, total_days: int,
+    weather_temp_max: Optional[float] = None, precipitation_chance: Optional[float] = None
 ) -> Dict[str, Any]:
     """Plan activities for a single day.
 
@@ -467,11 +436,7 @@ def plan_single_day_activities(
     Returns:
         Activities for the day
     """
-    return {
-        "destination": destination,
-        "day_number": day_number,
-        "note": "Full day plan generated as part of complete itinerary"
-    }
+    return {"destination": destination, "day_number": day_number, "note": "Full day plan generated as part of complete itinerary"}
 
 
 @tool
@@ -481,17 +446,11 @@ def get_available_destinations() -> Dict[str, Any]:
     Returns:
         Info about destination coverage
     """
-    return {
-        "coverage": "All destinations worldwide supported via LLM generation",
-        "note": "No hardcoded city list — plans are generated fresh for every query"
-    }
+    return {"coverage": "All destinations worldwide supported via LLM generation"}
 
 
 @tool
-def estimate_time_per_attraction(
-    destination: str,
-    attraction_count: int = None
-) -> Dict[str, Any]:
+def estimate_time_per_attraction(destination: str, attraction_count: int = None) -> Dict[str, Any]:
     """Estimate time needed for attractions.
 
     Args:
@@ -501,13 +460,7 @@ def estimate_time_per_attraction(
     Returns:
         Time estimates
     """
-    count = attraction_count or 4
-    return {
-        "destination": destination,
-        "estimated_hours_per_attraction": 2.0,
-        "recommended_daily_attractions": 3,
-        "notes": "Relaxed pace recommended — quality over quantity"
-    }
+    return {"destination": destination, "estimated_hours_per_attraction": 2.0, "recommended_daily_attractions": 3, "notes": "Relaxed pace recommended"}
 
 
 # ========================= TOOL LIST ========================= #
