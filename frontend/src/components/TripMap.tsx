@@ -24,13 +24,24 @@ interface MapsData {
   route_analysis?: string;
   recommended_mode?: string;
 }
-interface ItineraryDay { day: number; date: string; activities: string[] }
+interface RouteStop {
+  lat: number;
+  lng: number;
+  name?: string;
+  visit_minutes?: number;
+  category?: string;
+}
 interface TripMapProps {
   mapsData: MapsData;
   itineraryDays?: ItineraryDay[];
   origin?: string;
   destination?: string;
   apiBaseUrl?: string;
+  routeOptimization?: {
+    applied: boolean;
+    km_saved: number;
+    day_routes?: RouteStop[][];
+  };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,6 +70,26 @@ const makeMarkerSvg = (label: string, colour: string) =>
       fill="white">${label}</text>
   </svg>`;
 
+const makeStopMarkerSvg = (label: string | number, colour: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+    <circle cx="14" cy="14" r="12" fill="${colour}" stroke="white" stroke-width="2" />
+    <text x="14" y="14" text-anchor="middle" dominant-baseline="central"
+      font-family="system-ui,sans-serif" font-size="11" font-weight="800"
+      fill="white">${label}</text>
+  </svg>`;
+
+const DAY_COLOURS = [
+  "#8b5cf6", // Violet
+  "#ec4899", // Pink
+  "#f97316", // Orange
+  "#10b981", // Emerald
+  "#3b82f6", // Blue
+  "#eab308", // Yellow
+  "#a855f7", // Purple
+  "#14b8a6", // Teal
+];
+const dayColour = (dayIndex: number) => DAY_COLOURS[dayIndex % DAY_COLOURS.length];
+
 // ── Inject Leaflet CSS once into <head> via DOM (App Router safe) ─────────────
 function ensureLeafletCSS() {
   const id = "leaflet-css";
@@ -72,6 +103,12 @@ function ensureLeafletCSS() {
   document.head.appendChild(link);
 }
 
+const TILE_URLS = {
+  dark: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+  light: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+  satellite: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+};
+
 type PolylineLayer = import("leaflet").Polyline;
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +117,7 @@ export default function TripMap({
   itineraryDays = [],
   origin,
   destination,
+  routeOptimization,
   apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010",
 }: TripMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -97,6 +135,20 @@ export default function TripMap({
     altMeta: Record<string, { distance?: string; duration?: string }>;
     primaryMeta: { distance?: string; duration?: string; transport_mode?: string };
   } | null>(null);
+
+  const hasOptimization = !!(routeOptimization?.applied && routeOptimization?.day_routes?.length);
+  const [viewMode, setViewMode] = useState<"route" | "stops">(hasOptimization ? "stops" : "route");
+  const [activeDay, setActiveDay] = useState<number | "all">("all");
+  const [mapStyle, setMapStyle] = useState<"dark" | "light" | "satellite">("dark");
+
+  // Automatically update viewMode if routeOptimization updates
+  useEffect(() => {
+    if (routeOptimization?.applied && routeOptimization?.day_routes?.length) {
+      setViewMode("stops");
+    } else {
+      setViewMode("route");
+    }
+  }, [routeOptimization]);
 
   // Resolve origin/destination from every possible field the backend might send
   const resolvedOrigin = (origin || mapsData?.origin || mapsData?.origin_city || "").trim();
@@ -189,6 +241,7 @@ export default function TripMap({
   // ── Step 2: init Leaflet once mapData is ready ────────────────────────────
   useEffect(() => {
     if (!mapData || !mapContainerRef.current) return;
+    const currentMapData = mapData;
     let isMounted = true;
 
     async function initMap() {
@@ -224,7 +277,7 @@ export default function TripMap({
       });
 
       L.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        TILE_URLS[mapStyle],
         { maxZoom: 19 }
       ).addTo(map);
 
@@ -246,63 +299,116 @@ export default function TripMap({
         bounds.push([coord.lat, coord.lng]);
       };
 
-      // Primary polyline
-      if (mapData.primaryPolyline.length > 1) {
-        const latlngs = mapData.primaryPolyline.map(c => [c.lat, c.lng] as [number, number]);
-        const pl = L.polyline(latlngs, {
-          color: modeColour(mapData.primaryMeta.transport_mode),
-          weight: 5, opacity: 0.9, lineCap: "round", lineJoin: "round",
-        }).addTo(map);
-        layersRef.current["primary"] = pl;
-        bounds.push(...latlngs);
-      }
+      // Draw layers and markers based on viewMode
+      if (viewMode === "stops" && routeOptimization?.day_routes) {
+        routeOptimization.day_routes.forEach((dayRoute, dayIdx) => {
+          const dayNum = dayIdx + 1;
+          if (activeDay !== "all" && activeDay !== dayNum) return;
 
-      // Alternative polylines (dimmed)
-      for (const [mode, coords] of Object.entries(mapData.altPolylines)) {
-        if (coords.length < 2) continue;
-        const latlngs = coords.map(c => [c.lat, c.lng] as [number, number]);
-        const pl = L.polyline(latlngs, {
-          color: modeColour(mode), weight: 3, opacity: 0.3,
-          dashArray: "8 6", lineCap: "round",
-        }).addTo(map);
-        layersRef.current[mode] = pl;
-      }
+          const color = dayColour(dayIdx);
+          const coordinates: [number, number][] = [];
 
-      // Markers
-      if (mapData.originCoord)
-        addMarker(mapData.originCoord, "A", "#f59e0b",
-          `<b>${mapData.originCoord.label ?? resolvedOrigin}</b><br/>Start`);
+          if (Array.isArray(dayRoute)) {
+            dayRoute.forEach((stop, stopIdx) => {
+              if (stop && typeof stop.lat === "number" && typeof stop.lng === "number") {
+                const coord: Coord = { lat: stop.lat, lng: stop.lng };
+                const visitLabel = stopIdx + 1;
+                
+                // Draw stop marker
+                const stopIcon = L.divIcon({
+                  html: makeStopMarkerSvg(visitLabel, color),
+                  className: "",
+                  iconSize: [28, 28],
+                  iconAnchor: [14, 14],
+                  popupAnchor: [0, -12],
+                });
 
-      if (mapData.destCoord)
-        addMarker(mapData.destCoord, "B", "#ef4444",
-          `<b>${mapData.destCoord.label ?? resolvedDest}</b><br/>End`);
+                const stopName = stop.name || `Stop ${visitLabel}`;
+                const visitMinutes = stop.visit_minutes || 60;
+                const categoryText = stop.category ? `<br/>Category: ${stop.category}` : "";
+                const popupHtml = `<b>Day ${dayNum} - Stop #${visitLabel}</b><br/><b>${stopName}</b><br/>Duration: ${visitMinutes} mins${categoryText}`;
 
-      // Day stop markers (best-effort geocode)
-      const dayPlaces = itineraryDays
-        .map(day => {
-          const place = day.activities.find(a => a.length < 60 && !/[.?!]$/.test(a));
-          return place ? { day: day.day, text: place } : null;
-        })
-        .filter(Boolean) as { day: number; text: string }[];
+                L.marker([coord.lat, coord.lng], { icon: stopIcon })
+                  .addTo(map)
+                  .bindPopup(popupHtml);
 
-      await Promise.allSettled(
-        dayPlaces.slice(0, 6).map(async ({ day, text }) => {
-          try {
-            const r = await fetch(`${apiBaseUrl}/api/v1/map/geocode/${encodeURIComponent(text)}`);
-            if (!r.ok) return;
-            const geo = await r.json();
-            if (!geo.success || !isMounted) return;
-            const icon = L.divIcon({
-              html: makeMarkerSvg(String(day), "#7c3aed"),
-              className: "",
-              iconSize: [36, 44], iconAnchor: [18, 42], popupAnchor: [0, -40],
+                coordinates.push([coord.lat, coord.lng]);
+                bounds.push([coord.lat, coord.lng]);
+              }
             });
-            L.marker([geo.lat, geo.lng], { icon })
-              .addTo(map)
-              .bindPopup(`<b>Day ${day}</b><br/>${geo.name ?? text}`);
-          } catch { /* best-effort */ }
-        })
-      );
+          }
+
+          // Draw dotted polyline connecting day's stops
+          if (coordinates.length > 1) {
+            L.polyline(coordinates, {
+              color: color,
+              weight: 4,
+              opacity: 0.85,
+              dashArray: "6 6",
+              lineCap: "round",
+              lineJoin: "round",
+            }).addTo(map);
+          }
+        });
+      } else {
+        // Primary polyline
+        if (currentMapData.primaryPolyline.length > 1) {
+          const latlngs = currentMapData.primaryPolyline.map(c => [c.lat, c.lng] as [number, number]);
+          const pl = L.polyline(latlngs, {
+            color: modeColour(currentMapData.primaryMeta.transport_mode),
+            weight: 5, opacity: 0.9, lineCap: "round", lineJoin: "round",
+          }).addTo(map);
+          layersRef.current["primary"] = pl;
+          bounds.push(...latlngs);
+        }
+
+        // Alternative polylines (dimmed)
+        for (const [mode, coords] of Object.entries(currentMapData.altPolylines)) {
+          if (coords.length < 2) continue;
+          const latlngs = coords.map(c => [c.lat, c.lng] as [number, number]);
+          const pl = L.polyline(latlngs, {
+            color: modeColour(mode), weight: 3, opacity: 0.3,
+            dashArray: "8 6", lineCap: "round",
+          }).addTo(map);
+          layersRef.current[mode] = pl;
+        }
+
+        // Markers
+        if (currentMapData.originCoord)
+          addMarker(currentMapData.originCoord, "A", "#f59e0b",
+            `<b>${currentMapData.originCoord.label ?? resolvedOrigin}</b><br/>Start`);
+
+        if (currentMapData.destCoord)
+          addMarker(currentMapData.destCoord, "B", "#ef4444",
+            `<b>${currentMapData.destCoord.label ?? resolvedDest}</b><br/>End`);
+
+        // Day stop markers (best-effort geocode)
+        const dayPlaces = itineraryDays
+          .map(day => {
+            const place = day.activities.find(a => a.length < 60 && !/[.?!]$/.test(a));
+            return place ? { day: day.day, text: place } : null;
+          })
+          .filter(Boolean) as { day: number; text: string }[];
+
+        await Promise.allSettled(
+          dayPlaces.slice(0, 6).map(async ({ day, text }) => {
+            try {
+              const r = await fetch(`${apiBaseUrl}/api/v1/map/geocode/${encodeURIComponent(text)}`);
+              if (!r.ok) return;
+              const geo = await r.json();
+              if (!geo.success || !isMounted) return;
+              const icon = L.divIcon({
+                html: makeMarkerSvg(String(day), "#7c3aed"),
+                className: "",
+                iconSize: [36, 44], iconAnchor: [18, 42], popupAnchor: [0, -40],
+              });
+              L.marker([geo.lat, geo.lng], { icon })
+                .addTo(map)
+                .bindPopup(`<b>Day ${day}</b><br/>${geo.name ?? text}`);
+            } catch { /* best-effort */ }
+          })
+        );
+      }
 
       // Fit bounds
       if (bounds.length > 1) {
@@ -319,7 +425,7 @@ export default function TripMap({
     initMap();
     return () => { isMounted = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapData]);
+  }, [mapData, viewMode, activeDay, mapStyle]);
 
   // ── Step 3: toggle polyline styles on mode change ─────────────────────────
   useEffect(() => {
@@ -373,34 +479,146 @@ export default function TripMap({
                 <span className="text-2xl">🗺️</span>
               </div>
               <div>
-                <h3 className="text-lg font-bold text-white">Route Map</h3>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h3 className="text-lg font-bold text-white">Route Map</h3>
+                  {routeOptimization?.applied && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm">
+                      🎯 Route optimized — saved {routeOptimization.km_saved.toFixed(1)}km of travel
+                    </span>
+                  )}
+                </div>
                 {(resolvedOrigin || resolvedDest) && (
                   <p className="text-sm text-violet-300">{resolvedOrigin} → {resolvedDest}</p>
                 )}
               </div>
             </div>
 
-            {/* Mode pills */}
-            <div className="flex gap-2 flex-wrap">
-              {allModes.map(mode => {
-                const active = activeMode === mode;
-                const colour = mode === "primary" ? modeColour(primaryMode) : modeColour(mode);
-                const label  = mode === "primary" ? primaryMode : mode;
+            {/* View Mode, Theme Selector, and Mode pills */}
+            <div className="flex items-center gap-3 flex-wrap">
+              
+              {/* Map Theme Switcher */}
+              <div className="flex bg-black/40 p-1 rounded-full border border-violet-500/20">
+                <button
+                  onClick={() => setMapStyle("dark")}
+                  title="Dark Map"
+                  className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                    mapStyle === "dark"
+                      ? "bg-violet-600 text-white shadow"
+                      : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  🌙 Dark
+                </button>
+                <button
+                  onClick={() => setMapStyle("light")}
+                  title="Light Map"
+                  className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                    mapStyle === "light"
+                      ? "bg-violet-600 text-white shadow"
+                      : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  ☀️ Light
+                </button>
+                <button
+                  onClick={() => setMapStyle("satellite")}
+                  title="Satellite Map"
+                  className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                    mapStyle === "satellite"
+                      ? "bg-violet-600 text-white shadow"
+                      : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  🛰️ Satellite
+                </button>
+              </div>
+
+              {routeOptimization?.applied && routeOptimization?.day_routes && routeOptimization.day_routes.length > 0 && (
+                <div className="flex bg-black/40 p-1 rounded-full border border-violet-500/20">
+                  <button
+                    onClick={() => setViewMode("stops")}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                      viewMode === "stops"
+                        ? "bg-violet-600 text-white shadow"
+                        : "text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    📍 Daily Stops
+                  </button>
+                  <button
+                    onClick={() => setViewMode("route")}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                      viewMode === "route"
+                        ? "bg-violet-600 text-white shadow"
+                        : "text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    🛣️ Route
+                  </button>
+                </div>
+              )}
+
+              {viewMode === "route" && (
+                <div className="flex gap-2 flex-wrap">
+                  {allModes.map(mode => {
+                    const active = activeMode === mode;
+                    const colour = mode === "primary" ? modeColour(primaryMode) : modeColour(mode);
+                    const label  = mode === "primary" ? primaryMode : mode;
+                    return (
+                      <button key={mode} onClick={() => setActiveMode(mode)}
+                        style={{ borderColor: active ? colour : "transparent", color: active ? colour : "#a1a1aa" }}
+                        className="px-3 py-1.5 rounded-full text-xs font-semibold border-2 transition-all bg-black/30 hover:bg-black/50">
+                        {modeEmoji(label)} {label}
+                        {mode === "primary" && (
+                          <span className="ml-1.5 text-[10px] bg-violet-500/30 text-violet-200 px-1.5 py-0.5 rounded-full">
+                            best
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Day filter pills */}
+          {viewMode === "stops" && routeOptimization?.day_routes && routeOptimization.day_routes.length > 0 && (
+            <div className="flex gap-1.5 mt-4 overflow-x-auto pb-1 scrollbar-none border-t border-violet-500/10 pt-3">
+              <button
+                onClick={() => setActiveDay("all")}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                  activeDay === "all"
+                    ? "bg-violet-500/20 border-violet-500 text-violet-300"
+                    : "bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                All Days
+              </button>
+              {routeOptimization.day_routes.map((_, idx) => {
+                const dayNum = idx + 1;
+                const color = dayColour(idx);
                 return (
-                  <button key={mode} onClick={() => setActiveMode(mode)}
-                    style={{ borderColor: active ? colour : "transparent", color: active ? colour : "#a1a1aa" }}
-                    className="px-3 py-1.5 rounded-full text-xs font-semibold border-2 transition-all bg-black/30 hover:bg-black/50">
-                    {modeEmoji(label)} {label}
-                    {mode === "primary" && (
-                      <span className="ml-1.5 text-[10px] bg-violet-500/30 text-violet-200 px-1.5 py-0.5 rounded-full">
-                        best
-                      </span>
-                    )}
+                  <button
+                    key={dayNum}
+                    onClick={() => setActiveDay(dayNum)}
+                    style={{ borderColor: activeDay === dayNum ? color : undefined }}
+                    className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                      activeDay === dayNum
+                        ? "bg-violet-500/10 text-white"
+                        : "bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    <span
+                      className="inline-block w-2.5 h-2.5 rounded-full mr-1.5"
+                      style={{ backgroundColor: color }}
+                    />
+                    Day {dayNum}
                   </button>
                 );
               })}
             </div>
-          </div>
+          )}
 
           {mapsData?.route_analysis && (
             <p className="mt-3 text-sm text-zinc-300 bg-black/20 rounded-xl px-4 py-3 border border-violet-500/10 leading-relaxed">
@@ -458,17 +676,32 @@ export default function TripMap({
                 <span className="text-zinc-500 text-xs">travel time</span>
               </div>
             )}
-            <div className="ml-auto flex items-center gap-4 text-xs text-zinc-600">
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-3 rounded-full bg-amber-400" /> Origin
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-3 rounded-full bg-red-500" /> Destination
-              </span>
-              {itineraryDays.length > 0 && (
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-3 rounded-full bg-violet-500" /> Day stops
-                </span>
+            <div className="ml-auto flex flex-wrap items-center gap-4 text-xs text-zinc-400">
+              {viewMode === "stops" && routeOptimization?.day_routes ? (
+                routeOptimization.day_routes.map((_, idx) => {
+                  const dayNum = idx + 1;
+                  const color = dayColour(idx);
+                  return (
+                    <span key={dayNum} className="flex items-center gap-1.5">
+                      <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: color }} />
+                      Day {dayNum}
+                    </span>
+                  );
+                })
+              ) : (
+                <>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-3 rounded-full bg-amber-400" /> Origin
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-3 rounded-full bg-red-500" /> Destination
+                  </span>
+                  {itineraryDays.length > 0 && (
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-3 h-3 rounded-full bg-violet-500" /> Day stops
+                    </span>
+                  )}
+                </>
               )}
             </div>
           </div>

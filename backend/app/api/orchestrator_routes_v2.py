@@ -471,6 +471,7 @@ async def get_session_result(session_id: str):
             "maps": state.get("maps_data"),
             "budget": state.get("budget_data"),
             "itinerary": state.get("itinerary_data"),
+            "route_optimization": state.get("route_optimization"),
             "messages": state.get("messages", []),
             "errors": state.get("errors", []),
             "agent_statuses": state.get("agent_statuses", {}),

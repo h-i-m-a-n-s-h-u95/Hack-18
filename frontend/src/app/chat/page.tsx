@@ -391,7 +391,7 @@ const RouteCard = ({ data }) => {
                   </div>
                   <div className="text-right">
                     <p className="text-sm text-emerald-200">
-                      {(route as any).distance} • {(route as any).duration}
+                      {(route as { distance?: string; duration?: string }).distance} • {(route as { distance?: string; duration?: string }).duration}
                     </p>
                   </div>
                 </div>
@@ -872,6 +872,7 @@ const TravelChatPage = () => {
                     itineraryDays={results.itinerary_data?.itinerary_days}
                     origin={results.maps_data.origin}
                     destination={results.maps_data.destination}
+                    routeOptimization={results.route_optimization}
                   />
                 </>
               )}

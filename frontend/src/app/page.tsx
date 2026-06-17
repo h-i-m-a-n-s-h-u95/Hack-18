@@ -36,7 +36,26 @@ interface Budget { total: number; transportation: number; accommodation: number;
 interface RouteInfo { distance?: string; duration?: string; transport_mode?: string; }
 interface MapsData { origin?: string; destination?: string; primary_route?: RouteInfo; alternative_routes?: Record<string, RouteInfo>; route_analysis?: string; }
 interface EventInfo { name?: string; date?: string; time?: string; venue?: string; category?: string; description?: string; price_min?: number; price_max?: number; currency?: string; }
-interface PlanData { itinerary: ItineraryDay[]; budget: Budget; weather: DayWeather[]; maps: MapsData | null; events: EventInfo[]; processing_time_ms: number; }
+interface RouteStop {
+  lat: number;
+  lng: number;
+  name?: string;
+  visit_minutes?: number;
+  category?: string;
+}
+interface PlanData {
+  itinerary: ItineraryDay[];
+  budget: Budget;
+  weather: DayWeather[];
+  maps: MapsData | null;
+  events: EventInfo[];
+  processing_time_ms: number;
+  route_optimization?: {
+    applied: boolean;
+    km_saved: number;
+    day_routes?: RouteStop[][];
+  };
+}
 
 // ─── Normalizers — handle field name variants from backend ───────────────────
 function normalizeWeatherDay(w: Record<string, unknown>): DayWeather {
@@ -339,6 +358,7 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
           itineraryDays={data.itinerary}
           origin={data.maps.origin}
           destination={data.maps.destination}
+          routeOptimization={data.route_optimization}
         />
       )}
       {/* Events */}
@@ -457,7 +477,15 @@ const Page = () => {
         const finalDays = itineraryDays.length >= expandedDates.length && itineraryDays.length > 0
           ? itineraryDays : reconstructItineraryDays(itineraryDays, expandedDates, budget);
 
-        setPlanData({ itinerary: finalDays, budget, weather, maps, events, processing_time_ms: 0 });
+        setPlanData({
+          itinerary: finalDays,
+          budget,
+          weather,
+          maps,
+          events,
+          processing_time_ms: 0,
+          route_optimization: result.route_optimization || result.itinerary?.route_optimization,
+        });
         setIsPlanning(false);
         return;
       }

@@ -189,6 +189,7 @@ class TravelState(TypedDict):
     # Final Output
     trip_summary: Optional[str]
     final_itinerary: Optional[str]
+    route_optimization: Optional[Dict[str, Any]]
     
     # Metadata
     total_agents: int
@@ -266,6 +267,7 @@ def create_initial_state(
         # Final
         trip_summary=None,
         final_itinerary=None,
+        route_optimization=None,
         
         # Metadata
         total_agents=5,

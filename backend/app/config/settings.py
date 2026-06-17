@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Maps API (OpenRouteService)
     openroute_api_key: Optional[str] = None
 
+    # Google Places API (for attraction discovery and geo-optimization)
+    google_places_api_key: Optional[str] = None
+
     # RapidAPI — field covers both RAPIDAPI_KEY and RAPIDAPI_API_KEY in .env
     rapidapi_api_key: Optional[str] = None
 

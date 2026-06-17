@@ -142,6 +142,7 @@ async def plan_trip(request: TripPlanRequest):
                 },
                 "budget": final_state.get("budget_data"),
                 "itinerary": final_state.get("itinerary_data"),
+                "route_optimization": final_state.get("route_optimization"),
                 "final_itinerary_text": final_state.get("final_itinerary"),
                 "agent_status": final_state.get("agent_status"),
                 "completed_agents": final_state.get("completed_agents"),
@@ -339,6 +340,7 @@ async def get_session_full_data(session_id: str):
                 },
                 "budget": state.get("budget_data"),
                 "itinerary": state.get("itinerary_data"),
+                "route_optimization": state.get("route_optimization"),
                 "final_itinerary_text": state.get("final_itinerary")
             },
             "metadata": {

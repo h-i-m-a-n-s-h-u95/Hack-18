@@ -11,7 +11,91 @@ import json
 import os
 import httpx
 
+from app.ml.attraction_database import get_attractions_for_city, has_attraction_data, filter_by_interests
+from app.ml.clustering_service import cluster_attractions_by_day
+from app.ml.route_optimizer import optimize_full_itinerary
+
 logger = logging.getLogger(__name__)
+
+async def build_optimized_route_plan(
+    destination: str,
+    total_days: int,
+    interest_tags: list = None,
+) -> dict:
+    """
+    Run the full clustering + TSP pipeline for a destination, using
+    LIVE Google Places data (no hardcoded coordinates).
+
+    Returns:
+    {
+        "available": True,
+        "day_routes": [[{...attraction...}, ...], ...],  # per day, in visit order
+        "stats": {"km_saved": 8.4, "total_optimized_km": 22.1, "ortools_used": True}
+    }
+
+    Returns {"available": False} if the city has fewer than 2 discoverable
+    attractions or the Google Places API key is missing — caller falls
+    back to letting Groq freely decide order, no crash.
+    """
+    from app.ml.attraction_database import get_attractions_for_city, has_attraction_data, filter_by_interests
+    from app.ml.clustering_service import cluster_attractions_by_day
+    from app.ml.route_optimizer import optimize_full_itinerary
+
+    if not await has_attraction_data(destination):
+        logger.info(f"[Itinerary] No discoverable attractions for '{destination}' — skipping geo-optimization")
+        return {"available": False}
+
+    attractions = await get_attractions_for_city(destination)
+    attractions = filter_by_interests(attractions, interest_tags or [])
+
+    if len(attractions) < 2:
+        return {"available": False}
+
+    cluster_days = max(1, min(total_days, len(attractions)))
+
+    day_clusters = cluster_attractions_by_day(
+        attractions, num_days=cluster_days, max_per_day=4
+    )
+    optimized_routes, stats = optimize_full_itinerary(day_clusters)
+
+    logger.info(
+        f"[Itinerary] Geo-optimization for {destination}: "
+        f"{len(attractions)} live attractions -> {cluster_days} days, "
+        f"saved {stats['km_saved']}km vs naive order"
+    )
+
+    return {
+        "available":  True,
+        "day_routes": optimized_routes,
+        "stats":      stats,
+    }
+
+
+def format_route_plan_for_prompt(route_plan: dict) -> str:
+    """
+    Convert the optimized route plan into text for the Groq prompt,
+    giving the LLM a geographic skeleton instead of letting it guess order.
+    This function stays SYNC — it's pure string formatting.
+    """
+    if not route_plan.get("available"):
+        return ""
+
+    lines = ["PRE-OPTIMIZED GEOGRAPHIC ROUTE (live data — use this exact attraction "
+              "order per day, do not reorder — only add timing, food stops, and "
+              "practical details around them):"]
+
+    for day_idx, day_attractions in enumerate(route_plan["day_routes"], start=1):
+        if not day_attractions:
+            continue
+        names = " → ".join(a["name"] for a in day_attractions)
+        lines.append(f"  Day {day_idx}: {names}")
+
+    stats = route_plan.get("stats", {})
+    if stats.get("km_saved", 0) > 0:
+        lines.append(f"  (Route optimization saved approximately {stats['km_saved']} km of travel)")
+
+    return "\n".join(lines)
+
 
 
 # ========================= DATE EXPANSION ========================= #
@@ -39,7 +123,7 @@ def expand_travel_dates(travel_dates: List[str]) -> List[str]:
     return expanded if expanded else travel_dates
 
 
-# ========================= GROQ LLM CALL ========================= #
+# ========================= GROQ LLM CALL =========================
 
 async def generate_llm_itinerary(
     destination: str,
@@ -54,13 +138,21 @@ async def generate_llm_itinerary(
     maps_data: Optional[Dict],
     budget_data: Optional[Dict],
     groq_api_key: Optional[str] = None,  # ← accept key directly from agent
-) -> List[Dict]:
+) -> tuple:
     """
     Call Groq API to generate a fully personalized day-by-day itinerary.
-    Returns a list of day dicts: [{day, date, activities, notes, estimated_cost}]
+    Returns a tuple: (list of day dicts, route_plan dict)
     """
     total_days = len(travel_dates)
     daily_budget = round(budget_total / total_days, 0) if budget_total and total_days else 2000
+
+    # ── NEW: Geographic clustering + TSP optimization (live Google Places) ──
+    interest_list = []
+    if user_preferences:
+        interest_list = [w.strip().lower() for w in user_preferences.replace(".", ",").split(",") if w.strip()]
+
+    route_plan = await build_optimized_route_plan(destination, total_days, interest_list)
+    route_plan_text = format_route_plan_for_prompt(route_plan)
 
     # ── Resolve API key: prefer passed-in key, fall back to env ──────────────
     api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
@@ -70,7 +162,7 @@ async def generate_llm_itinerary(
 
     if not api_key:
         logger.error("[Itinerary] No Groq API key available — check settings.groq_api_key or GROQ_API_KEY env var")
-        return _fallback_itinerary(destination, travel_dates, daily_budget)
+        return _fallback_itinerary(destination, travel_dates, daily_budget), route_plan
 
     # ── Format weather ────────────────────────────────────────────────────────
     weather_text = ""
@@ -147,6 +239,8 @@ TRANSPORT OPTIONS FROM {origin.upper()} TO {destination.upper()}:
 BUDGET BREAKDOWN:
 {budget_text or '  Not available'}
 
+{route_plan_text}
+
 RULES:
 1. Respond ONLY with a valid JSON array — no markdown, no explanation, no extra text
 2. Exactly {total_days} objects in the array, one per date
@@ -207,7 +301,7 @@ Respond with ONLY this JSON structure:
 
         if response.status_code != 200:
             logger.error(f"[Itinerary] Groq API error: {response.status_code} {response.text[:500]}")
-            return _fallback_itinerary(destination, travel_dates, daily_budget)
+            return _fallback_itinerary(destination, travel_dates, daily_budget), route_plan
 
         raw = response.json()["choices"][0]["message"]["content"].strip()
         logger.info(f"[Itinerary] Groq raw response ({len(raw)} chars): {raw[:200]}")
@@ -235,17 +329,17 @@ Respond with ONLY this JSON structure:
             logger.warning(f"[Itinerary] Padded missing day {i+1}")
 
         logger.info(f"[Itinerary] Successfully generated {len(days)} days for {destination}")
-        return days
+        return days, route_plan
 
     except httpx.TimeoutException:
         logger.error("[Itinerary] Groq request timed out after 90s")
-        return _fallback_itinerary(destination, travel_dates, daily_budget)
+        return _fallback_itinerary(destination, travel_dates, daily_budget), route_plan
     except json.JSONDecodeError as e:
         logger.error(f"[Itinerary] JSON parse error: {e} | Raw: {raw[:500]}")
-        return _fallback_itinerary(destination, travel_dates, daily_budget)
+        return _fallback_itinerary(destination, travel_dates, daily_budget), route_plan
     except Exception as e:
         logger.error(f"[Itinerary] Groq call failed: {type(e).__name__}: {e}")
-        return _fallback_itinerary(destination, travel_dates, daily_budget)
+        return _fallback_itinerary(destination, travel_dates, daily_budget), route_plan
 
 
 def _fallback_day(destination: str, day_num: int, date: str, daily_budget: float) -> Dict:
@@ -327,9 +421,10 @@ def create_daily_itinerary(
                         groq_api_key=None,  # will fall back to env var
                     )
                 )
-                days = future.result(timeout=90)
+                result = future.result(timeout=90)
+                days, route_plan = result if isinstance(result, tuple) else (result, {"available": False})
         else:
-            days = loop.run_until_complete(
+            result = loop.run_until_complete(
                 generate_llm_itinerary(
                     destination=destination, origin="",
                     travel_dates=expanded_dates, travelers_count=travelers_count,
@@ -339,6 +434,7 @@ def create_daily_itinerary(
                     groq_api_key=None,
                 )
             )
+            days, route_plan = result if isinstance(result, tuple) else (result, {"available": False})
     except Exception as e:
         logger.error(f"Tool LLM call failed: {e}")
         days = _fallback_itinerary(destination, expanded_dates, daily_budget)

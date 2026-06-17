@@ -175,7 +175,7 @@ Create detailed, personalized travel itineraries with local recommendations.
         api_key = self._get_api_key()
 
         # ── Call Groq ─────────────────────────────────────────────────────────
-        itinerary_days_raw = await generate_llm_itinerary(
+        itinerary_days_raw, route_plan = await generate_llm_itinerary(
             destination=destination,
             origin=origin,
             travel_dates=travel_dates,
@@ -238,6 +238,11 @@ Create detailed, personalized travel itineraries with local recommendations.
                 f"Your personalized {total_days}-day itinerary for {destination} "
                 f"is ready. Tailored to your {budget_range or 'moderate'} budget and preferences."
             ),
+            "route_optimization": {
+                "applied": route_plan.get("available", False),
+                "day_routes": route_plan.get("day_routes", []),
+                "km_saved": route_plan.get("stats", {}).get("km_saved", 0)
+            },
             "structured_data": {},
             "transport_details": {},
             "key_tips": [],

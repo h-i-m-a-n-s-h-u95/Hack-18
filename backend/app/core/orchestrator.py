@@ -368,10 +368,12 @@ class TravelOrchestrator:
             elif agent_name == "itinerary":
                 state["itinerary_data"] = data.get("itinerary_days", [])
                 state["final_itinerary"] = data.get("itinerary_narrative", "")
+                state["route_optimization"] = data.get("route_optimization")
                 state["itinerary_complete"] = True
                 update_payload = {
                     "itinerary_data": state["itinerary_data"],
-                    "final_itinerary": state["final_itinerary"]
+                    "final_itinerary": state["final_itinerary"],
+                    "route_optimization": state["route_optimization"]
                 }
 
             # Send streaming update
