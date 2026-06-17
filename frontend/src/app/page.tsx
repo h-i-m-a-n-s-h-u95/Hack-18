@@ -1,7 +1,11 @@
 "use client";
 import { useState, useEffect, useCallback, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import dynamic from "next/dynamic";
 import Hyperspeed from "@/components/Hyperspeed/Hyperspeed";
+
+// Leaflet needs `window`, so load TripMap only on the client
+const TripMap = dynamic(() => import("@/components/TripMap"), { ssr: false });
 
 const HyperspeedBackground = memo(function HyperspeedBackground() {
   return (
@@ -328,6 +332,15 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
       <WeatherStrip weather={data.weather} />
       {/* Route */}
       {data.maps && <RouteCard maps={data.maps} />}
+      {/* Interactive Map */}
+      {data.maps && (
+        <TripMap
+          mapsData={data.maps}
+          itineraryDays={data.itinerary}
+          origin={data.maps.origin}
+          destination={data.maps.destination}
+        />
+      )}
       {/* Events */}
       <EventsCard events={data.events} />
       {/* Days */}

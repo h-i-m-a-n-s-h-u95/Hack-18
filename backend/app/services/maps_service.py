@@ -37,7 +37,12 @@ class MapsService:
     # Geocoding & Routing
     # ------------------------------
     async def geocode_location(self, location: str) -> Optional[Dict[str, Any]]:
-        """Geocode a location string to coordinates"""
+        """Geocode a location string to coordinates.
+
+        Tries OpenRouteService first, then falls back to Nominatim (OSM)
+        if the ORS call fails (e.g. expired API key).
+        """
+        # --- Primary: OpenRouteService ---
         try:
             async with httpx.AsyncClient() as client:
                 headers = {"Authorization": self.api_key}
@@ -55,23 +60,56 @@ class MapsService:
                 r.raise_for_status()
                 data = r.json()
                 
-                if not data.get("features"):
-                    return None
+                if data.get("features"):
+                    f = data["features"][0]
+                    coords = f["geometry"]["coordinates"]
+                    props = f["properties"]
                     
-                f = data["features"][0]
-                coords = f["geometry"]["coordinates"]
-                props = f["properties"]
-                
-                return {
-                    "coordinates": [coords[1], coords[0]],  # [lat, lon]
-                    "name": props.get("name", location),
-                    "region": props.get("region", ""),
-                    "country": props.get("country", ""),
-                    "confidence": props.get("confidence", 0)
-                }
+                    return {
+                        "coordinates": [coords[1], coords[0]],  # [lat, lon]
+                        "name": props.get("name", location),
+                        "region": props.get("region", ""),
+                        "country": props.get("country", ""),
+                        "confidence": props.get("confidence", 0)
+                    }
         except Exception as e:
-            logger.error(f"Geocoding failed for {location}: {e}")
-            return None
+            logger.warning(f"ORS geocoding failed for '{location}': {e}")
+
+        # --- Fallback: Nominatim (OpenStreetMap) ---
+        try:
+            logger.info(f"Trying Nominatim fallback for '{location}'")
+            async with httpx.AsyncClient() as client:
+                params = {
+                    "q": location,
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                }
+                r = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params=params,
+                    headers={"User-Agent": "TBuddy/2.0 (travel-planner)"},
+                    timeout=10,
+                )
+                r.raise_for_status()
+                results = r.json()
+
+                if results:
+                    hit = results[0]
+                    lat = float(hit["lat"])
+                    lon = float(hit["lon"])
+                    addr = hit.get("address", {})
+                    return {
+                        "coordinates": [lat, lon],
+                        "name": hit.get("display_name", location).split(",")[0],
+                        "region": addr.get("state", ""),
+                        "country": addr.get("country", ""),
+                        "confidence": 0.8,
+                    }
+        except Exception as e:
+            logger.error(f"Nominatim fallback also failed for '{location}': {e}")
+
+        return None
 
     async def get_route(
         self, 
@@ -119,7 +157,11 @@ class MapsService:
         end_coords: List[float], 
         transport_mode: str
     ) -> Dict[str, Any]:
-        """Calculate fallback route using haversine formula"""
+        """Calculate fallback route using haversine formula.
+
+        Includes a straight-line geometry so the frontend can still draw
+        a polyline on the Leaflet map.
+        """
         try:
             lat1, lon1 = math.radians(start_coords[0]), math.radians(start_coords[1])
             lat2, lon2 = math.radians(end_coords[0]), math.radians(end_coords[1])
@@ -141,9 +183,24 @@ class MapsService:
             }
             speed = speeds.get(transport_mode, 50)
             dur_seconds = (dist_km / speed) * 3600
+
+            # Build a straight-line geometry with intermediate points
+            # so the frontend can draw a visible polyline.
+            num_points = max(10, int(dist_km / 20))  # ~1 point per 20 km
+            line_coords = []
+            for i in range(num_points + 1):
+                t = i / num_points
+                lat = start_coords[1] + t * (end_coords[1] - start_coords[1])  # lon
+                lng = start_coords[0] + t * (end_coords[0] - start_coords[0])  # lat
+                # ORS GeoJSON uses [lon, lat]
+                line_coords.append([lat, lng])
             
             return {
                 "features": [{
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": line_coords,
+                    },
                     "properties": {
                         "summary": {
                             "distance": dist_km * 1000,  # meters
@@ -154,8 +211,16 @@ class MapsService:
             }
         except Exception as e:
             logger.error(f"Fallback route calculation failed: {e}")
+            # Minimal fallback with just start→end line
             return {
                 "features": [{
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [start_coords[1], start_coords[0]],
+                            [end_coords[1], end_coords[0]],
+                        ],
+                    },
                     "properties": {
                         "summary": {
                             "distance": 10000,
