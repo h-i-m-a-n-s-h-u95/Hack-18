@@ -700,6 +700,9 @@ Query Type: <query_type>
                 "destination": state["destination"],
                 "travel_dates": state["travel_dates"]
             },
+            "metadata": {
+                "timeout_ms": settings.timeout_weather
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -730,6 +733,9 @@ Query Type: <query_type>
                 "travel_dates": state["travel_dates"],
                 "interests": interests
             },
+            "metadata": {
+                "timeout_ms": settings.timeout_events
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -753,7 +759,11 @@ Query Type: <query_type>
             "action": "request",
             "payload": {
                 "origin": state.get("origin", "Current Location"),
-                "destination": state["destination"]
+                "destination": state["destination"],
+                "travel_dates": state.get("travel_dates", []),
+            },
+            "metadata": {
+                "timeout_ms": settings.timeout_maps
             },
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -785,6 +795,9 @@ Query Type: <query_type>
                 # Include modification context for updates
                 "is_update": state.get("is_follow_up", False),
                 "update_request": state.get("user_query") if state.get("update_type") == "budget_update" else None
+            },
+            "metadata": {
+                "timeout_ms": settings.timeout_budget
             },
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -839,13 +852,24 @@ Query Type: <query_type>
         completed_count = 0
         total_agents = len(agents)
         
-        timeout = 30  # 30 seconds timeout per agent
+        # Determine the maximum timeout for the pending agents (convert ms to seconds)
+        agent_timeouts = {
+            "weather": settings.timeout_weather,
+            "events": settings.timeout_events,
+            "maps": settings.timeout_maps,
+            "budget": settings.timeout_budget,
+            "itinerary": settings.timeout_itinerary
+        }
+        total_timeout = max([agent_timeouts.get(agent, 30000) for agent in agents]) / 1000
+        start_time = asyncio.get_event_loop().time()
         
         while pending_agents:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            remaining_timeout = max(1.0, total_timeout - elapsed)
             try:
                 done, _ = await asyncio.wait(
                     [futures[agent] for agent in pending_agents],
-                    timeout=timeout,
+                    timeout=remaining_timeout,
                     return_when=asyncio.FIRST_COMPLETED
                 )
                 

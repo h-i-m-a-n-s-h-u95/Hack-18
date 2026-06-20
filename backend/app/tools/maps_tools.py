@@ -73,10 +73,51 @@ class MapsServiceHelpers:
     }
     
     # RapidAPI hosts
-    SKYSCANNER_HOST = "skyscanner44.p.rapidapi.com"
-    TRAINS_HOST = "indian-railway-irctc.p.rapidapi.com"
-    BUSES_HOST = "redbus2.p.rapidapi.com"
-    HOTELS_HOST = "booking-com.p.rapidapi.com"
+    SKYSCANNER_HOST = settings.skyscanner_host
+    TRAINS_HOST = settings.trains_host
+    TRIPGO_HOST = settings.tripgo_host
+    HOTELS_HOST = settings.hotels_host
+
+    # Well-known IATA airport codes
+    AIRPORT_CODES = {
+        "delhi": "DEL", "new delhi": "DEL", "mumbai": "BOM",
+        "bangalore": "BLR", "bengaluru": "BLR", "chennai": "MAA",
+        "kolkata": "CCU", "hyderabad": "HYD", "pune": "PNQ",
+        "ahmedabad": "AMD", "goa": "GOI", "jaipur": "JAI",
+        "lucknow": "LKO", "kochi": "COK", "varanasi": "VNS",
+        "guwahati": "GAU", "chandigarh": "IXC", "patna": "PAT",
+        "bhubaneswar": "BBI", "indore": "IDR", "nagpur": "NAG",
+        "srinagar": "SXR", "amritsar": "ATQ", "udaipur": "UDR",
+        "coimbatore": "CJB", "thiruvananthapuram": "TRV",
+        "london": "LHR", "paris": "CDG", "new york": "JFK",
+        "dubai": "DXB", "singapore": "SIN", "bangkok": "BKK",
+        "tokyo": "NRT", "hong kong": "HKG", "sydney": "SYD",
+        "agra": "AGR", "jodhpur": "JDH", "shimla": "SLV",
+        "jammu": "IXJ",
+    }
+
+    # Well-known IRCTC station codes
+    STATION_CODES = {
+        "delhi": "NDLS", "new delhi": "NDLS", "mumbai": "CSMT",
+        "mumbai central": "BCT", "bangalore": "SBC", "bengaluru": "SBC",
+        "chennai": "MAS", "kolkata": "HWH", "hyderabad": "SC",
+        "pune": "PUNE", "ahmedabad": "ADI", "jaipur": "JP",
+        "lucknow": "LKO", "varanasi": "BSB", "agra": "AGC",
+        "goa": "MAO", "chandigarh": "CDG", "patna": "PNBE",
+        "bhubaneswar": "BBS", "indore": "INDB", "nagpur": "NGP",
+        "jodhpur": "JU", "udaipur": "UDZ", "shimla": "SML",
+        "amritsar": "ASR", "guwahati": "GHY", "kochi": "ERS",
+        "thiruvananthapuram": "TVC", "coimbatore": "CBE",
+        "jammu": "JAT",
+    }
+
+    @staticmethod
+    def resolve_airport_code(city: str) -> Optional[str]:
+        return MapsServiceHelpers.AIRPORT_CODES.get(city.strip().lower())
+
+    @staticmethod
+    def resolve_station_code(city: str) -> Optional[str]:
+        return MapsServiceHelpers.STATION_CODES.get(city.strip().lower())
     
     @staticmethod
     def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -165,6 +206,9 @@ class MapsServiceHelpers:
 
 # ========================= LANGCHAIN TOOLS ========================= #
 
+# In-memory geocoding cache to prevent duplicate external requests
+_GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
+
 @tool
 async def geocode_location(location: str) -> Dict[str, Any]:
     """Convert a location name to geographic coordinates using OpenRouteService.
@@ -175,6 +219,11 @@ async def geocode_location(location: str) -> Dict[str, Any]:
     Returns:
         Dictionary with coordinates, name, region, country, and confidence
     """
+    loc_key = location.strip().lower()
+    if loc_key in _GEOCODE_CACHE:
+        logger.info(f"Geocoding cache hit for '{location}'")
+        return _GEOCODE_CACHE[loc_key]
+
     try:
         async with httpx.AsyncClient() as client:
             headers = {"Authorization": settings.openroute_api_key}
@@ -187,7 +236,7 @@ async def geocode_location(location: str) -> Dict[str, Any]:
                 "https://api.openrouteservice.org/geocode/search",
                 headers=headers,
                 params=params,
-                timeout=10
+                timeout=8
             )
             resp.raise_for_status()
             data = resp.json()
@@ -199,7 +248,7 @@ async def geocode_location(location: str) -> Dict[str, Any]:
             coords = f["geometry"]["coordinates"]
             props = f["properties"]
             
-            return {
+            result = {
                 "location": location,
                 "coordinates": [coords[1], coords[0]],  # [lat, lon]
                 "latitude": coords[1],
@@ -209,6 +258,8 @@ async def geocode_location(location: str) -> Dict[str, Any]:
                 "country": props.get("country", ""),
                 "confidence": props.get("confidence", 0)
             }
+            _GEOCODE_CACHE[loc_key] = result
+            return result
     except Exception as e:
         logger.error(f"Geocoding failed for {location}: {e}")
         return {"error": str(e)}
@@ -261,7 +312,7 @@ async def get_route(origin: str, destination: str, transport_mode: str = "drivin
                 f"https://api.openrouteservice.org/v2/directions/{profile}/geojson",
                 headers=headers,
                 json=payload,
-                timeout=30
+                timeout=15
             )
             resp.raise_for_status()
             route_data = resp.json()
@@ -339,93 +390,252 @@ async def get_multiple_routes(origin: str, destination: str) -> Dict[str, Any]:
 
 
 @tool
-async def search_flights(origin_code: str, dest_code: str, date: str) -> Dict[str, Any]:
-    """Search for flight options between airports.
+async def search_flights(origin: str, destination: str, date: str) -> Dict[str, Any]:
+    """Search for flight options between cities.
+    Automatically resolves city names to airport codes.
     
     Args:
-        origin_code: Origin airport code (e.g., 'DEL', 'BOM')
-        dest_code: Destination airport code
+        origin: Origin city name (e.g., 'Delhi', 'Mumbai')
+        destination: Destination city name
         date: Departure date in YYYY-MM-DD format
     
     Returns:
         List of available flights with pricing and schedules
     """
-    try:
-        url = f"https://{MapsServiceHelpers.SKYSCANNER_HOST}/search"
-        headers = {
-            "X-RapidAPI-Key": settings.rapidapi_key,
-            "X-RapidAPI-Host": MapsServiceHelpers.SKYSCANNER_HOST
-        }
-        params = {
-            "origin": origin_code,
-            "destination": dest_code,
-            "departureDate": date,
-            "currency": "INR"
-        }
-        
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, params=params, timeout=30)
+    headers = {
+        "X-RapidAPI-Key": settings.rapidapi_key,
+        "X-RapidAPI-Host": MapsServiceHelpers.SKYSCANNER_HOST
+    }
+
+    async with httpx.AsyncClient() as client:
+        async def resolve_airport(query_str: str) -> Optional[Dict[str, str]]:
+            try:
+                # Try prefix-less first (/flights/searchAirport)
+                url = f"https://{MapsServiceHelpers.SKYSCANNER_HOST}/flights/searchAirport"
+                r = await client.get(url, headers=headers, params={"query": query_str}, timeout=8)
+                if r.status_code == 404:
+                    # Fallback to /api/v1/flights/searchAirport
+                    url = f"https://{MapsServiceHelpers.SKYSCANNER_HOST}/api/v1/flights/searchAirport"
+                    r = await client.get(url, headers=headers, params={"query": query_str}, timeout=8)
+
+                if r.status_code == 200:
+                    data = r.json()
+                    places = []
+                    if isinstance(data, dict):
+                        if "data" in data:
+                            d = data["data"]
+                            if isinstance(d, list):
+                                places = d
+                            elif isinstance(d, dict):
+                                places = d.get("places", [])
+                        elif "places" in data:
+                            places = data["places"]
+                    elif isinstance(data, list):
+                        places = data
+                    
+                    if places:
+                        return {
+                            "skyId": places[0].get("skyId"),
+                            "entityId": places[0].get("entityId")
+                        }
+            except Exception as ex:
+                logger.warning(f"Failed to query Skyscanner autocomplete for {query_str}: {ex}")
+            return None
+
+        # 1. Resolve origin
+        origin_info = await resolve_airport(origin)
+        origin_sky_id = origin_info["skyId"] if origin_info else None
+        origin_entity_id = origin_info["entityId"] if origin_info else ""
+
+        # Fallback to hardcoded list if autocomplete failed
+        if not origin_sky_id:
+            fallback_code = MapsServiceHelpers.resolve_airport_code(origin)
+            if fallback_code:
+                origin_info = await resolve_airport(fallback_code)
+                origin_sky_id = origin_info["skyId"] if origin_info else fallback_code
+                origin_entity_id = origin_info["entityId"] if origin_info else ""
+
+        # 2. Resolve destination
+        dest_info = await resolve_airport(destination)
+        dest_sky_id = dest_info["skyId"] if dest_info else None
+        dest_entity_id = dest_info["entityId"] if dest_info else ""
+
+        # Fallback to hardcoded list if autocomplete failed
+        if not dest_sky_id:
+            fallback_code = MapsServiceHelpers.resolve_airport_code(destination)
+            if fallback_code:
+                dest_info = await resolve_airport(fallback_code)
+                dest_sky_id = dest_info["skyId"] if dest_info else fallback_code
+                dest_entity_id = dest_info["entityId"] if dest_info else ""
+
+        if not origin_sky_id or not dest_sky_id:
+            return {
+                "origin": origin,
+                "destination": destination,
+                "date": date,
+                "flights": [],
+                "count": 0,
+                "note": f"Could not resolve airport codes for {origin} and/or {destination}"
+            }
+
+        try:
+            params = {
+                "originSkyId": origin_sky_id,
+                "destinationSkyId": dest_sky_id,
+                "date": date,
+                "adults": "1",
+                "currency": "INR"
+            }
+            if origin_entity_id:
+                params["originEntityId"] = origin_entity_id
+            if dest_entity_id:
+                params["destinationEntityId"] = dest_entity_id
+
+            # Try prefix-less first (/flights/searchFlights)
+            url_search = f"https://{MapsServiceHelpers.SKYSCANNER_HOST}/flights/searchFlights"
+            resp = await client.get(url_search, headers=headers, params=params, timeout=20)
+            if resp.status_code == 404:
+                # Fallback to /api/v1/flights/searchFlights
+                url_search = f"https://{MapsServiceHelpers.SKYSCANNER_HOST}/api/v1/flights/searchFlights"
+                resp = await client.get(url_search, headers=headers, params=params, timeout=20)
+
             resp.raise_for_status()
             data = resp.json()
             
+            raw_flights = []
+            if "data" in data and isinstance(data["data"], dict):
+                raw_flights = data["data"].get("itineraries", [])
+            elif isinstance(data, dict):
+                raw_flights = data.get("itineraries", [])
+
+            flights = []
+            for f in raw_flights[:8]:
+                legs = f.get("legs", [{}])
+                leg = legs[0] if legs else {}
+                
+                # Robust Airline parsing
+                carriers_data = leg.get("carriers", {})
+                airline = "Unknown"
+                if isinstance(carriers_data, dict):
+                    marketing = carriers_data.get("marketing")
+                    if isinstance(marketing, list) and marketing:
+                        airline = marketing[0].get("name", "Unknown")
+                    elif isinstance(carriers_data.get("marketing"), dict):
+                        airline = carriers_data.get("marketing", {}).get("name", "Unknown")
+                elif isinstance(carriers_data, list) and carriers_data:
+                    airline = carriers_data[0].get("name", "Unknown")
+                
+                # Robust Price parsing
+                price_data = f.get("price", {})
+                price = None
+                if isinstance(price_data, dict):
+                    price = price_data.get("amount") if price_data.get("amount") is not None else price_data.get("raw")
+                elif isinstance(price_data, (int, float)):
+                    price = price_data
+
+                # Robust Duration parsing
+                duration_minutes = leg.get("durationMinutes") if leg.get("durationMinutes") is not None else leg.get("durationInMinutes")
+                
+                flights.append({
+                    "airline": airline,
+                    "price": price,
+                    "currency": price_data.get("currency", "INR") if isinstance(price_data, dict) else "INR",
+                    "departure_time": leg.get("departure", ""),
+                    "arrival_time": leg.get("arrival", ""),
+                    "duration_minutes": duration_minutes,
+                    "stops": leg.get("stopCount", 0),
+                    "origin_code": origin_sky_id,
+                    "dest_code": dest_sky_id,
+                })
+            
             return {
-                "origin": origin_code,
-                "destination": dest_code,
+                "origin": origin,
+                "destination": destination,
+                "origin_code": origin_sky_id,
+                "dest_code": dest_sky_id,
                 "date": date,
-                "flights": data.get("itineraries", []),
-                "count": len(data.get("itineraries", []))
+                "flights": flights,
+                "count": len(flights)
             }
             
-    except Exception as e:
-        logger.error(f"Flight search failed: {e}")
-        return {"error": str(e)}
+        except Exception as e:
+            logger.error(f"Flight search failed: {e}")
+            return {"error": str(e), "flights": [], "count": 0, "note": f"Flight search failed: {str(e)}"}
 
 
 @tool
-async def search_trains(from_station: str, to_station: str, date: str) -> Dict[str, Any]:
-    """Search for train options between stations (Indian Railways).
+async def search_trains(origin: str, destination: str, date: str) -> Dict[str, Any]:
+    """Search for train options between cities (Indian Railways).
+    Automatically resolves city names to station codes.
     
     Args:
-        from_station: Origin station code
-        to_station: Destination station code
+        origin: Origin city name (e.g., 'Delhi', 'Mumbai')
+        destination: Destination city name
         date: Journey date in YYYY-MM-DD format
     
     Returns:
         List of available trains with schedules and pricing
     """
+    from_code = MapsServiceHelpers.resolve_station_code(origin)
+    to_code = MapsServiceHelpers.resolve_station_code(destination)
+
+    if not from_code or not to_code:
+        return {
+            "origin": origin,
+            "destination": destination,
+            "date": date,
+            "trains": [],
+            "count": 0,
+            "note": f"Could not resolve station codes for {origin} and/or {destination}"
+        }
+
     try:
-        url = f"https://{MapsServiceHelpers.TRAINS_HOST}/trainBetweenStations"
+        url = f"https://{MapsServiceHelpers.TRAINS_HOST}/api/v3/trainBetweenStations"
         headers = {
             "X-RapidAPI-Key": settings.rapidapi_key,
             "X-RapidAPI-Host": MapsServiceHelpers.TRAINS_HOST
         }
         params = {
-            "fromStationCode": from_station,
-            "toStationCode": to_station,
+            "fromStationCode": from_code,
+            "toStationCode": to_code,
             "dateOfJourney": date
         }
         
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, params=params, timeout=30)
+            resp = await client.get(url, headers=headers, params=params, timeout=15)
             resp.raise_for_status()
-            data = resp.json()
+            trains_raw = resp.json().get("data", [])
+
+            trains = [{
+                "train_number": t.get("train_number", ""),
+                "train_name": t.get("train_name", "Unknown"),
+                "departure_time": t.get("from_std", t.get("departure_time", "")),
+                "arrival_time": t.get("to_std", t.get("arrival_time", "")),
+                "duration": t.get("duration", ""),
+                "classes": t.get("class_type", []),
+                "from_station": from_code,
+                "to_station": to_code,
+                "days_of_run": t.get("run_days", ""),
+            } for t in trains_raw[:10]]
             
             return {
-                "from_station": from_station,
-                "to_station": to_station,
+                "origin": origin,
+                "destination": destination,
+                "from_station": from_code,
+                "to_station": to_code,
                 "date": date,
-                "trains": data.get("data", []),
-                "count": len(data.get("data", []))
+                "trains": trains,
+                "count": len(trains)
             }
             
     except Exception as e:
         logger.error(f"Train search failed: {e}")
-        return {"error": str(e)}
+        return {"error": str(e), "trains": [], "count": 0}
 
 
 @tool
 async def search_buses(origin: str, destination: str, date: str) -> Dict[str, Any]:
-    """Search for bus options between cities.
+    """Search for bus and public transit options between cities using TripGo.
     
     Args:
         origin: Origin city name
@@ -433,36 +643,95 @@ async def search_buses(origin: str, destination: str, date: str) -> Dict[str, An
         date: Journey date in YYYY-MM-DD format
     
     Returns:
-        List of available buses with schedules and pricing
+        List of available buses/transit with schedules and pricing
     """
     try:
-        url = f"https://{MapsServiceHelpers.BUSES_HOST}/searchBuses"
-        headers = {
-            "X-RapidAPI-Key": settings.rapidapi_key,
-            "X-RapidAPI-Host": MapsServiceHelpers.BUSES_HOST
-        }
-        params = {
-            "fromCity": origin,
-            "toCity": destination,
-            "doj": date
-        }
-        
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            
+        # Geocode both locations
+        origin_geo = await geocode_location.ainvoke({"location": origin})
+        dest_geo = await geocode_location.ainvoke({"location": destination})
+
+        if "error" in origin_geo or "error" in dest_geo:
             return {
                 "origin": origin,
                 "destination": destination,
                 "date": date,
-                "buses": data.get("buses", []),
-                "count": len(data.get("buses", []))
+                "buses": [],
+                "count": 0,
+                "note": "Could not geocode locations for transit search"
             }
-            
+
+        url = f"https://{MapsServiceHelpers.TRIPGO_HOST}/routing.json"
+        headers = {
+            "X-RapidAPI-Key": settings.rapidapi_key,
+            "X-RapidAPI-Host": MapsServiceHelpers.TRIPGO_HOST
+        }
+        params = {
+            "from": f"({origin_geo['latitude']},{origin_geo['longitude']})",
+            "to": f"({dest_geo['latitude']},{dest_geo['longitude']})",
+            "modes": "pt_pub",
+            "departAfter": f"{date}T08:00:00",
+            "bestOnly": "false",
+            "v": "12"
+        }
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, params=params, timeout=15)
+            if resp.status_code == 404:
+                url_fallback = f"https://{MapsServiceHelpers.TRIPGO_HOST}/v1/routing.json"
+                resp = await client.get(url_fallback, headers=headers, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+
+            groups = data.get("groups", [])
+            buses = []
+            for group in groups[:6]:
+                for trip in group.get("trips", [])[:2]:
+                    segments = trip.get("segments", [])
+                    sched_segs = [
+                        s for s in segments
+                        if s.get("type", "") == "scheduled"
+                        or s.get("modeInfo", {}).get("alt", "").lower()
+                        in ("bus", "coach", "public transport", "ferry")
+                    ]
+                    if sched_segs:
+                        seg = sched_segs[0]
+                        buses.append({
+                            "operator_name": seg.get("serviceOperator",
+                                                     seg.get("modeInfo", {}).get("alt", "Transit")),
+                            "bus_type": seg.get("modeInfo", {}).get("alt", "Public Transit"),
+                            "departure_time": seg.get("startTime", ""),
+                            "arrival_time": seg.get("endTime", ""),
+                            "duration_minutes": trip.get("durationMinutes",
+                                                         seg.get("duration", 0) // 60
+                                                         if seg.get("duration") else None),
+                            "price": trip.get("moneyCost"),
+                            "currency": trip.get("currencySymbol", "\u20b9"),
+                            "service_number": seg.get("serviceNumber", ""),
+                        })
+
+            note = None
+            if isinstance(data, dict) and "error" in data:
+                err_msg = data["error"]
+                if "outside covered area" in err_msg.lower():
+                    note = "Transit coverage is limited for this region in TripGo. Local private & state buses (e.g., RedBus, MSRTC, KSRTC) run frequently on this route."
+                else:
+                    note = f"Transit search error: {err_msg}"
+
+            if not buses and not note:
+                note = "No bus/transit options found. Consider checking local operators or platforms like RedBus."
+
+            return {
+                "origin": origin,
+                "destination": destination,
+                "date": date,
+                "buses": buses[:8],
+                "count": len(buses[:8]),
+                "note": note
+            }
+
     except Exception as e:
-        logger.error(f"Bus search failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"Bus/transit search failed: {e}")
+        return {"error": str(e), "buses": [], "count": 0, "note": f"Transit search failed: {str(e)}"}
 
 
 @tool
@@ -491,7 +760,7 @@ async def search_hotels(location: str, checkin: str, checkout: str) -> Dict[str,
         }
         
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, params=params, timeout=30)
+            resp = await client.get(url, headers=headers, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             
@@ -533,11 +802,11 @@ async def get_comprehensive_travel_options(
         checkin = checkin or date
         checkout = checkout or date
         
-        # Fetch all options in parallel
+        # Fetch all options in parallel — tools now auto-resolve codes
         tasks = [
             get_route.ainvoke({"origin": origin, "destination": destination, "transport_mode": "driving"}),
-            search_flights.ainvoke({"origin_code": origin, "dest_code": destination, "date": date}),
-            search_trains.ainvoke({"from_station": origin, "to_station": destination, "date": date}),
+            search_flights.ainvoke({"origin": origin, "destination": destination, "date": date}),
+            search_trains.ainvoke({"origin": origin, "destination": destination, "date": date}),
             search_buses.ainvoke({"origin": origin, "destination": destination, "date": date}),
             search_hotels.ainvoke({"location": destination, "checkin": checkin, "checkout": checkout})
         ]
@@ -549,9 +818,9 @@ async def get_comprehensive_travel_options(
             "destination": destination,
             "date": date,
             "driving_route": results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])},
-            "flights": results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])},
-            "trains": results[2] if not isinstance(results[2], Exception) else {"error": str(results[2])},
-            "buses": results[3] if not isinstance(results[3], Exception) else {"error": str(results[3])},
+            "flights": results[1] if not isinstance(results[1], Exception) else {"error": str(results[1]), "flights": [], "count": 0},
+            "trains": results[2] if not isinstance(results[2], Exception) else {"error": str(results[2]), "trains": [], "count": 0},
+            "buses": results[3] if not isinstance(results[3], Exception) else {"error": str(results[3]), "buses": [], "count": 0},
             "hotels": results[4] if not isinstance(results[4], Exception) else {"error": str(results[4])}
         }
         

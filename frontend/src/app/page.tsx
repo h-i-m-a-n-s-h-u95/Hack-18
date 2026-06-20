@@ -35,8 +35,40 @@ interface DayWeather { date?: string; description?: string; temperature_max?: nu
 interface ItineraryDay { day: number; date: string; activities: string[]; notes?: string; estimated_cost?: number; }
 interface Budget { total: number; transportation: number; accommodation: number; food: number; activities: number; currency?: string; }
 interface RouteInfo { distance?: string; duration?: string; transport_mode?: string; }
-interface MapsData { origin?: string; destination?: string; primary_route?: RouteInfo; alternative_routes?: Record<string, RouteInfo>; route_analysis?: string; }
+interface FlightInfo { airline?: string; price?: number; currency?: string; departure_time?: string; arrival_time?: string; duration_minutes?: number; stops?: number; origin_code?: string; dest_code?: string; }
+interface TrainInfo { train_number?: string; train_name?: string; departure_time?: string; arrival_time?: string; duration?: string; classes?: string[]; from_station?: string; to_station?: string; days_of_run?: string; }
+interface BusInfo { operator_name?: string; bus_type?: string; departure_time?: string; arrival_time?: string; duration_minutes?: number; price?: number; currency?: string; service_number?: string; }
+interface TravelOptions { flights?: { flights?: FlightInfo[]; count?: number; origin_code?: string; dest_code?: string; note?: string }; trains?: { trains?: TrainInfo[]; count?: number; from_station?: string; to_station?: string; note?: string }; buses?: { buses?: BusInfo[]; count?: number; note?: string }; }
+interface MapsData { origin?: string; destination?: string; primary_route?: RouteInfo; alternative_routes?: Record<string, RouteInfo>; route_analysis?: string; travel_options?: TravelOptions; }
 interface EventInfo { name?: string; date?: string; time?: string; venue?: string; category?: string; description?: string; price_min?: number; price_max?: number; currency?: string; }
+interface HotelInfo {
+  id: string;
+  name: string;
+  area: string;
+  price_per_night: number | null;
+  currency: string;
+  rating: number;
+  review_count: number;
+  tier: "budget" | "mid-range" | "luxury";
+  amenities: string[];
+  description: string;
+  booking_tip: string;
+  photo_url?: string;
+  booking_url?: string;
+  lat?: number;
+  lng?: number;
+  proximity?: {
+    attraction_name: string;
+    distance_km: number;
+  };
+}
+interface HotelData {
+  destination: string;
+  currency: string;
+  generated_at: string;
+  source: string;
+  hotels: HotelInfo[];
+}
 interface RouteStop {
   lat: number;
   lng: number;
@@ -51,6 +83,7 @@ interface PlanData {
   maps: MapsData | null;
   events: EventInfo[];
   processing_time_ms: number;
+  hotels?: HotelData | null;
   route_optimization?: {
     applied: boolean;
     km_saved: number;
@@ -96,6 +129,7 @@ function normalizeMaps(raw: Record<string, unknown>): MapsData {
     alternative_routes: raw.alternative_routes
       ? Object.fromEntries(Object.entries(raw.alternative_routes as Record<string, unknown>).map(([k, v]) => [k, normalizeRoute(v as Record<string, unknown>)]))
       : undefined,
+    travel_options: raw.travel_options as TravelOptions | undefined,
   };
 }
 
@@ -281,6 +315,207 @@ const RouteCard = ({ maps }: { maps: MapsData }) => {
   );
 };
 
+// ─── TravelOptionsCard ────────────────────────────────────────────────────────
+const TravelOptionsCard = ({ travelOptions, origin, destination }: { travelOptions: TravelOptions; origin?: string; destination?: string }) => {
+  const [activeMode, setActiveMode] = useState<"flights" | "trains" | "buses">("flights");
+  const flights = travelOptions?.flights?.flights || [];
+  const trains = travelOptions?.trains?.trains || [];
+  const buses = travelOptions?.buses?.buses || [];
+
+  const totalOptions = flights.length + trains.length + buses.length;
+  if (totalOptions === 0) return null;
+
+  const tabs = [
+    { key: "flights" as const, label: "Flights", emoji: "✈️", count: flights.length, color: "sky" },
+    { key: "trains" as const, label: "Trains", emoji: "🚂", count: trains.length, color: "amber" },
+    { key: "buses" as const, label: "Buses", emoji: "🚌", count: buses.length, color: "emerald" },
+  ];
+
+  const fmtTime = (t?: string) => {
+    if (!t) return "";
+    try {
+      const d = new Date(t);
+      if (isNaN(d.getTime())) return t;
+      return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+    } catch { return t; }
+  };
+
+  const fmtDur = (mins?: number) => {
+    if (!mins) return "";
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
+      className="mb-8 p-6 bg-gradient-to-br from-indigo-900/20 to-violet-900/20 backdrop-blur-md border border-indigo-800/30 rounded-2xl"
+    >
+      <h3 className="text-xl font-light text-zinc-100 mb-1 flex items-center gap-2">
+        <span>🚀</span> Travel Options
+        <span className="ml-auto text-xs text-indigo-300">{totalOptions} options found</span>
+      </h3>
+      {origin && destination && <p className="text-sm text-indigo-300 mb-4">{origin} → {destination}</p>}
+
+      {/* Tabs */}
+      <div className="flex gap-2 mb-4">
+        {tabs.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveMode(tab.key)}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
+              activeMode === tab.key
+                ? tab.color === "sky"
+                  ? "bg-sky-600/40 text-sky-200 border border-sky-500/40 shadow-lg shadow-sky-900/20"
+                  : tab.color === "amber"
+                  ? "bg-amber-600/40 text-amber-200 border border-amber-500/40 shadow-lg shadow-amber-900/20"
+                  : "bg-emerald-600/40 text-emerald-200 border border-emerald-500/40 shadow-lg shadow-emerald-900/20"
+                : "bg-black/20 text-zinc-400 border border-zinc-700/30 hover:bg-white/5"
+            }`}
+          >
+            <span>{tab.emoji}</span>
+            {tab.label}
+            {tab.count > 0 && (
+              <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+                activeMode === tab.key ? "bg-white/15" : "bg-zinc-700/50"
+              }`}>{tab.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Flights Tab */}
+      <AnimatePresence mode="wait">
+        {activeMode === "flights" && (
+          <motion.div key="flights" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 10 }} transition={{ duration: 0.2 }}
+            className="space-y-3">
+            {flights.length === 0 ? (
+              <div className="text-center py-8 text-zinc-500">
+                <span className="text-3xl block mb-2">✈️</span>
+                <p className="text-sm">{travelOptions?.flights?.note || "No flights found for this route"}</p>
+              </div>
+            ) : (
+              flights.map((f, i) => (
+                <motion.div key={i} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
+                  className="p-4 bg-gradient-to-r from-sky-900/20 to-blue-900/15 border border-sky-700/25 rounded-xl hover:border-sky-600/40 transition-colors">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-sky-600/30 flex items-center justify-center text-lg">✈️</div>
+                      <div>
+                        <div className="text-white font-medium">{f.airline || "Airline"}</div>
+                        <div className="text-xs text-sky-300">
+                          {f.origin_code && f.dest_code ? `${f.origin_code} → ${f.dest_code}` : ""}
+                          {f.stops !== undefined && <span className="ml-2">{f.stops === 0 ? "Non-stop" : `${f.stops} stop${f.stops > 1 ? "s" : ""}`}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    {f.price && (
+                      <div className="text-right">
+                        <div className="text-sky-200 font-semibold text-lg">₹{f.price.toLocaleString()}</div>
+                        <div className="text-xs text-zinc-500">{f.currency || "INR"}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-3 flex items-center gap-4 text-xs text-zinc-400">
+                    {f.departure_time && <span>🛫 {fmtTime(f.departure_time)}</span>}
+                    {f.arrival_time && <span>🛬 {fmtTime(f.arrival_time)}</span>}
+                    {f.duration_minutes && <span>⏱️ {fmtDur(f.duration_minutes)}</span>}
+                  </div>
+                </motion.div>
+              ))
+            )}
+          </motion.div>
+        )}
+
+        {/* Trains Tab */}
+        {activeMode === "trains" && (
+          <motion.div key="trains" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 10 }} transition={{ duration: 0.2 }}
+            className="space-y-3">
+            {trains.length === 0 ? (
+              <div className="text-center py-8 text-zinc-500">
+                <span className="text-3xl block mb-2">🚂</span>
+                <p className="text-sm">{travelOptions?.trains?.note || "No trains found for this route"}</p>
+              </div>
+            ) : (
+              trains.map((t, i) => (
+                <motion.div key={i} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
+                  className="p-4 bg-gradient-to-r from-amber-900/20 to-orange-900/15 border border-amber-700/25 rounded-xl hover:border-amber-600/40 transition-colors">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-amber-600/30 flex items-center justify-center text-lg">🚂</div>
+                      <div>
+                        <div className="text-white font-medium">{t.train_name || "Train"}</div>
+                        <div className="text-xs text-amber-300">
+                          {t.train_number && <span>#{t.train_number} </span>}
+                          {t.from_station && t.to_station ? `${t.from_station} → ${t.to_station}` : ""}
+                        </div>
+                      </div>
+                    </div>
+                    {t.duration && (
+                      <div className="text-right">
+                        <div className="text-amber-200 font-semibold">⏱️ {t.duration}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-3 flex items-center gap-4 text-xs text-zinc-400">
+                    {t.departure_time && <span>🚉 Dep: {t.departure_time}</span>}
+                    {t.arrival_time && <span>🚉 Arr: {t.arrival_time}</span>}
+                    {t.classes && Array.isArray(t.classes) && t.classes.length > 0 && (
+                      <span>🎫 {t.classes.join(", ")}</span>
+                    )}
+                  </div>
+                  {t.days_of_run && <div className="mt-2 text-xs text-zinc-500">📅 Runs: {t.days_of_run}</div>}
+                </motion.div>
+              ))
+            )}
+          </motion.div>
+        )}
+
+        {/* Buses Tab */}
+        {activeMode === "buses" && (
+          <motion.div key="buses" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 10 }} transition={{ duration: 0.2 }}
+            className="space-y-3">
+            {buses.length === 0 ? (
+              <div className="text-center py-8 text-zinc-500">
+                <span className="text-3xl block mb-2">🚌</span>
+                <p className="text-sm">{travelOptions?.buses?.note || "No bus/transit options found for this route"}</p>
+              </div>
+            ) : (
+              buses.map((b, i) => (
+                <motion.div key={i} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
+                  className="p-4 bg-gradient-to-r from-emerald-900/20 to-teal-900/15 border border-emerald-700/25 rounded-xl hover:border-emerald-600/40 transition-colors">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-emerald-600/30 flex items-center justify-center text-lg">🚌</div>
+                      <div>
+                        <div className="text-white font-medium">{b.operator_name || "Transit"}</div>
+                        <div className="text-xs text-emerald-300">
+                          {b.bus_type || "Public Transit"}
+                          {b.service_number && <span className="ml-2">#{b.service_number}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    {b.price && (
+                      <div className="text-right">
+                        <div className="text-emerald-200 font-semibold text-lg">{b.currency || "₹"}{b.price.toLocaleString()}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-3 flex items-center gap-4 text-xs text-zinc-400">
+                    {b.departure_time && <span>🚏 Dep: {fmtTime(b.departure_time)}</span>}
+                    {b.arrival_time && <span>🚏 Arr: {fmtTime(b.arrival_time)}</span>}
+                    {b.duration_minutes && <span>⏱️ {fmtDur(b.duration_minutes)}</span>}
+                  </div>
+                </motion.div>
+              ))
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+};
+
 // ─── EventsCard ───────────────────────────────────────────────────────────────
 const EventsCard = ({ events }: { events: EventInfo[] }) => {
   if (!events?.length) return null;
@@ -316,19 +551,493 @@ const EventsCard = ({ events }: { events: EventInfo[] }) => {
   );
 };
 
+// ─── HotelCard ────────────────────────────────────────────────────────────────
+const TIER_STYLES: Record<string, { gradient: string; border: string; badge: string; badgeBg: string }> = {
+  budget:      { gradient: "from-emerald-900/20 to-green-900/10", border: "border-emerald-700/30", badge: "💚", badgeBg: "bg-emerald-900/50 text-emerald-300" },
+  "mid-range": { gradient: "from-amber-900/20 to-yellow-900/10", border: "border-amber-700/30",   badge: "💛", badgeBg: "bg-amber-900/50 text-amber-300" },
+  luxury:      { gradient: "from-purple-900/20 to-violet-900/10", border: "border-purple-700/30", badge: "💎", badgeBg: "bg-purple-900/50 text-purple-300" },
+};
+
+const HotelShimmer = () => (
+  <div className="space-y-4">
+    {[...Array(3)].map((_, i) => (
+      <div key={i} className="h-36 bg-zinc-800/50 rounded-2xl animate-pulse" />
+    ))}
+  </div>
+);
+
+const HotelCard = ({
+  hotels,
+  source,
+  generatedAt,
+  destination,
+  onRetry,
+  loading,
+  error,
+}: {
+  hotels: HotelInfo[];
+  source: string;
+  generatedAt: string;
+  destination: string;
+  onRetry: () => void;
+  loading: boolean;
+  error: string | null;
+}) => {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [minRating, setMinRating] = useState<number | null>(null);
+  const [sortBy, setSortBy] = useState<"popularity" | "price-asc" | "price-desc" | "rating">("popularity");
+  const [selectedAmenities, setSelectedAmenities] = useState<string[]>([]);
+
+  const fmtPrice = (n: number | null) =>
+    n != null ? new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n) : "Price N/A";
+
+  const timeAgo = (iso: string) => {
+    try {
+      const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+      if (diff < 60) return "just now";
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      return `${Math.floor(diff / 3600)}h ago`;
+    } catch { return ""; }
+  };
+
+  // Loading state
+  if (loading) return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-6 bg-zinc-900/50 backdrop-blur-md border border-zinc-800 rounded-2xl">
+      <h3 className="text-xl font-light text-zinc-100 mb-4 flex items-center gap-2">
+        <span>🏨</span> Finding Hotels...
+      </h3>
+      <HotelShimmer />
+    </motion.div>
+  );
+
+  // Error state with retry
+  if (error) return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center py-16">
+      <span className="text-4xl block mb-3">⚠️</span>
+      <p className="text-xl text-zinc-300 mb-2">Failed to load hotels</p>
+      <p className="text-sm text-zinc-500 mb-4">{error}</p>
+      <button onClick={onRetry} className="px-6 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-xl transition-colors text-sm font-medium">
+        🔄 Try Again
+      </button>
+    </motion.div>
+  );
+
+  // Empty state
+  if (!hotels?.length) return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center py-16">
+      <span className="text-4xl block mb-3">🏨</span>
+      <p className="text-xl text-zinc-300 mb-2">No hotels found</p>
+      <p className="text-sm text-zinc-500 mb-4">We couldn&apos;t find hotels for {destination}.</p>
+      <a
+        href={`https://www.booking.com/searchresults.html?ss=${encodeURIComponent(destination)}`}
+        target="_blank" rel="noopener noreferrer"
+        className="inline-block px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-colors text-sm font-medium"
+      >
+        🔗 Search on Booking.com
+      </a>
+    </motion.div>
+  );
+
+  // Extract unique amenities for filter options (take top 10)
+  const allAmenities = Array.from(
+    new Set((hotels || []).flatMap((h) => h.amenities || []))
+  ).slice(0, 10);
+
+  // Filter logic
+  const filteredHotels = (hotels || []).filter((h) => {
+    const matchQuery =
+      searchQuery === "" ||
+      h.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      h.area?.toLowerCase().includes(searchQuery.toLowerCase());
+
+    const matchRating = minRating === null || (h.rating && h.rating >= minRating);
+
+    const matchAmenities = selectedAmenities.every((amenity) =>
+      h.amenities?.includes(amenity)
+    );
+
+    return matchQuery && matchRating && matchAmenities;
+  });
+
+  // Sort logic
+  const sortedHotels = [...filteredHotels].sort((a, b) => {
+    if (sortBy === "price-asc") {
+      const pa = a.price_per_night ?? Infinity;
+      const pb = b.price_per_night ?? Infinity;
+      return pa - pb;
+    }
+    if (sortBy === "price-desc") {
+      const pa = a.price_per_night ?? -Infinity;
+      const pb = b.price_per_night ?? -Infinity;
+      return pb - pa;
+    }
+    if (sortBy === "rating") {
+      const ra = a.rating ?? 0;
+      const rb = b.rating ?? 0;
+      return rb - ra;
+    }
+    return 0; // popularity / default
+  });
+
+  // Group by tier
+  const tiers = ["budget", "mid-range", "luxury"] as const;
+  const tierLabels: Record<string, string> = { budget: "Budget Stays", "mid-range": "Mid-Range", luxury: "Luxury" };
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
+      {/* Fallback disclaimer */}
+      {source === "groq_fallback" && (
+        <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/30 rounded-xl flex items-center gap-2 text-sm text-amber-300">
+          <span>⚠️</span>
+          <span>Estimated recommendations — verify pricing before booking</span>
+        </div>
+      )}
+
+      {/* Header */}
+      <div className="mb-6 flex items-center justify-between">
+        <h3 className="text-xl font-light text-zinc-100 flex items-center gap-2">
+          <span>🏨</span> Hotel Recommendations
+          <span className="text-xs text-zinc-500 font-normal">{hotels.length} found</span>
+        </h3>
+        {generatedAt && (
+          <span className="text-xs text-zinc-500">Updated {timeAgo(generatedAt)}</span>
+        )}
+      </div>
+
+      {/* Dynamic Filters & Search Panel */}
+      <div className="mb-6 p-4 bg-zinc-900/40 backdrop-blur-md border border-zinc-800/80 rounded-2xl space-y-4 shadow-xl">
+        <div className="grid gap-3 md:grid-cols-3">
+          {/* Search bar */}
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 text-sm">🔍</span>
+            <input
+              type="text"
+              placeholder="Search hotel name or area..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-black/40 border border-zinc-800 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-500/50 transition-colors"
+            />
+          </div>
+
+          {/* Rating filter */}
+          <div className="flex gap-1">
+            <button
+              onClick={() => setMinRating(null)}
+              className={`flex-1 py-2 rounded-xl border text-[11px] font-medium transition-all ${
+                minRating === null
+                  ? "bg-violet-600 border-violet-500 text-white"
+                  : "bg-black/30 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              All Ratings
+            </button>
+            <button
+              onClick={() => setMinRating(7.5)}
+              className={`flex-1 py-2 rounded-xl border text-[11px] font-medium transition-all ${
+                minRating === 7.5
+                  ? "bg-violet-600 border-violet-500 text-white"
+                  : "bg-black/30 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              ⭐ 7.5+
+            </button>
+            <button
+              onClick={() => setMinRating(8.5)}
+              className={`flex-1 py-2 rounded-xl border text-[11px] font-medium transition-all ${
+                minRating === 8.5
+                  ? "bg-violet-600 border-violet-500 text-white"
+                  : "bg-black/30 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              ⭐ 8.5+
+            </button>
+          </div>
+
+          {/* Sort selection */}
+          <div className="relative">
+            <select
+              value={sortBy}
+              onChange={(e: any) => setSortBy(e.target.value)}
+              className="w-full pl-4 pr-8 py-2 bg-black/40 border border-zinc-800 rounded-xl text-sm text-zinc-300 focus:outline-none focus:border-violet-500/50 transition-colors appearance-none cursor-pointer"
+            >
+              <option value="popularity" className="bg-zinc-950">Sort by: Popularity</option>
+              <option value="price-asc" className="bg-zinc-950">Price: Low to High</option>
+              <option value="price-desc" className="bg-zinc-950">Price: High to Low</option>
+              <option value="rating" className="bg-zinc-950">Rating: High to Low</option>
+            </select>
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none text-xs">▼</span>
+          </div>
+        </div>
+
+        {/* Amenities pills */}
+        {allAmenities.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-zinc-800/40">
+            <span className="text-[11px] text-zinc-500 mr-1 font-medium">Filter by Amenity:</span>
+            {allAmenities.map((amenity) => {
+              const selected = selectedAmenities.includes(amenity);
+              return (
+                <button
+                  key={amenity}
+                  onClick={() => {
+                    if (selected) {
+                      setSelectedAmenities(selectedAmenities.filter(a => a !== amenity));
+                    } else {
+                      setSelectedAmenities([...selectedAmenities, amenity]);
+                    }
+                  }}
+                  className={`text-[10px] px-2.5 py-1 rounded-full transition-all border ${
+                    selected
+                      ? "bg-violet-500/20 border-violet-500 text-violet-300 shadow-sm shadow-violet-500/10"
+                      : "bg-black/20 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  {amenity}
+                </button>
+              );
+            })}
+            {selectedAmenities.length > 0 && (
+              <button
+                onClick={() => setSelectedAmenities([])}
+                className="text-[10px] px-2.5 py-1 text-red-400 hover:text-red-300 font-medium"
+              >
+                Clear ×
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Tier groups */}
+      <div className="space-y-6">
+        {sortedHotels.length === 0 && (
+          <div className="text-center py-12 bg-zinc-900/20 border border-zinc-800/50 rounded-2xl">
+            <span className="text-3xl block mb-2">🔍</span>
+            <p className="text-sm text-zinc-400">No hotels match your current search criteria or filters.</p>
+            <button
+              onClick={() => {
+                setSearchQuery("");
+                setMinRating(null);
+                setSelectedAmenities([]);
+              }}
+              className="mt-3 text-xs text-violet-400 hover:text-violet-300 underline font-medium"
+            >
+              Reset all filters
+            </button>
+          </div>
+        )}
+        {tiers.map(tier => {
+          const tierHotels = sortedHotels.filter(h => h.tier === tier);
+          if (!tierHotels.length) return null;
+          const style = TIER_STYLES[tier] || TIER_STYLES["mid-range"];
+          return (
+            <div key={tier}>
+              <div className="flex items-center gap-2 mb-3">
+                <span>{style.badge}</span>
+                <span className="text-sm font-medium text-zinc-300">{tierLabels[tier]}</span>
+                <div className="flex-1 h-px bg-zinc-800" />
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                {tierHotels.map((hotel, i) => (
+                  <motion.div
+                    key={hotel.id || i}
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.08 }}
+                    className={`p-4 bg-gradient-to-br ${style.gradient} backdrop-blur-md border ${style.border} rounded-2xl hover:scale-[1.01] transition-transform duration-200`}
+                  >
+                    <div className="flex gap-4">
+                      {/* Photo */}
+                      {hotel.photo_url ? (
+                        <div className="w-24 h-24 rounded-xl overflow-hidden flex-shrink-0 bg-zinc-800">
+                          <img src={hotel.photo_url} alt={hotel.name} className="w-full h-full object-cover" loading="lazy" />
+                        </div>
+                      ) : (
+                        <div className="w-24 h-24 rounded-xl bg-zinc-800/50 flex items-center justify-center flex-shrink-0">
+                          <span className="text-3xl">🏨</span>
+                        </div>
+                      )}
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <h4 className="text-white font-medium truncate">{hotel.name}</h4>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 ${style.badgeBg}`}>
+                            {tier}
+                          </span>
+                        </div>
+                        {hotel.area && <p className="text-xs text-zinc-400 mt-0.5 truncate">📍 {hotel.area}</p>}
+                        {hotel.proximity && (
+                          <div className="mt-1">
+                            <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 bg-violet-500/10 text-violet-300 rounded-full border border-violet-500/20">
+                              🧭 {hotel.proximity.distance_km} km from {hotel.proximity.attraction_name}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-3 mt-1.5">
+                          {hotel.rating > 0 && (
+                            <span className="text-xs text-yellow-400">⭐ {hotel.rating}/10</span>
+                          )}
+                          {hotel.review_count > 0 && (
+                            <span className="text-xs text-zinc-500">({hotel.review_count.toLocaleString()} reviews)</span>
+                          )}
+                        </div>
+                        <div className="text-lg font-semibold text-zinc-100 mt-1">
+                          {fmtPrice(hotel.price_per_night)}
+                          <span className="text-xs font-normal text-zinc-500">/night</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Amenities */}
+                    {hotel.amenities?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-3">
+                        {hotel.amenities.slice(0, 4).map((a, j) => (
+                          <span key={j} className="text-[10px] px-2 py-0.5 bg-black/30 text-zinc-400 rounded-full">{a}</span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Description + Booking tip */}
+                    {hotel.description && (
+                      <p className="text-xs text-zinc-300 mt-2 leading-relaxed">{hotel.description}</p>
+                    )}
+                    {hotel.booking_tip && (
+                      <p className="text-[11px] text-amber-400/80 mt-1.5 italic">💡 {hotel.booking_tip}</p>
+                    )}
+
+                    {/* Booking link */}
+                    {hotel.booking_url && (
+                      <a
+                        href={hotel.booking_url}
+                        target="_blank" rel="noopener noreferrer"
+                        className="mt-3 inline-flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                      >
+                        View on Booking.com →
+                      </a>
+                    )}
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </motion.div>
+  );
+};
+
 // ─── Tab definitions ──────────────────────────────────────────────────────────
-type SectionTab = "itinerary" | "map" | "weather" | "budget" | "events";
+type SectionTab = "itinerary" | "map" | "weather" | "budget" | "hotels" | "events";
 const SECTION_TABS: { id: SectionTab; label: string; icon: string }[] = [
   { id: "itinerary", label: "Itinerary", icon: "📅" },
   { id: "map",       label: "Map & Route", icon: "🗺️" },
   { id: "weather",   label: "Weather", icon: "🌤️" },
   { id: "budget",    label: "Budget", icon: "💰" },
+  { id: "hotels",    label: "Hotels", icon: "🏨" },
   { id: "events",    label: "Events", icon: "🎭" },
 ];
 
 // ─── ItineraryView ────────────────────────────────────────────────────────────
-const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string }) => {
+const ItineraryView = ({
+  data,
+  userQuery,
+  sessionId,
+  API_URL,
+  onUpdatePlanData,
+}: {
+  data: PlanData;
+  userQuery: string;
+  sessionId: string | null;
+  API_URL: string;
+  onUpdatePlanData: (updatedPlan: PlanData) => void;
+}) => {
   const [activeTab, setActiveTab] = useState<SectionTab>("itinerary");
+  const [swappingActivityId, setSwappingActivityId] = useState<string | null>(null);
+  const [swapAlternatives, setSwapAlternatives] = useState<any[]>([]);
+  const [loadingSwapOptions, setLoadingSwapOptions] = useState(false);
+  const [applyingSwap, setApplyingSwap] = useState(false);
+
+  // Hotel state
+  const [hotelData, setHotelData] = useState<HotelData | null>(data.hotels || null);
+  const [loadingHotels, setLoadingHotels] = useState(false);
+  const [hotelError, setHotelError] = useState<string | null>(null);
+  const [hotelsFetched, setHotelsFetched] = useState(false);
+
+  const handleFetchHotels = async () => {
+    if (!sessionId) return;
+    setLoadingHotels(true);
+    setHotelError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/v2/orchestrator/session/${sessionId}/hotels`);
+      if (res.status === 429) {
+        const body = await res.json().catch(() => ({}));
+        setHotelError(body.detail || "Rate limited. Please wait before refreshing.");
+        return;
+      }
+      if (!res.ok) throw new Error("Failed to load hotel recommendations");
+      const result: HotelData = await res.json();
+      setHotelData(result);
+      setHotelsFetched(true);
+    } catch (err) {
+      console.error(err);
+      setHotelError(err instanceof Error ? err.message : "Failed to load hotels");
+    } finally {
+      setLoadingHotels(false);
+    }
+  };
+
+  // Auto-fetch hotels on first tab click
+  const handleTabChange = (tab: SectionTab) => {
+    setActiveTab(tab);
+    if (tab === "hotels" && !hotelsFetched && !loadingHotels) {
+      handleFetchHotels();
+    }
+  };
+
+  const handleFetchSwapOptions = async (activityId: string) => {
+    setSwappingActivityId(activityId);
+    setLoadingSwapOptions(true);
+    try {
+      const res = await fetch(`${API_URL}/api/v2/orchestrator/session/${sessionId}/swap-options?activity_id=${activityId}`);
+      if (!res.ok) throw new Error("Failed to load options");
+      const result = await res.json();
+      setSwapAlternatives(result.alternatives || []);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to load swap alternatives.");
+    } finally {
+      setLoadingSwapOptions(false);
+    }
+  };
+
+  const handleApplySwap = async (activityId: string, alternative: any) => {
+    if (!sessionId) return;
+    setApplyingSwap(true);
+    try {
+      const res = await fetch(`${API_URL}/api/v2/orchestrator/session/${sessionId}/swap-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activity_id: activityId,
+          selected_alternative: alternative
+        })
+      });
+      if (!res.ok) throw new Error("Failed to apply swap");
+      const result = await res.json();
+      if (result.success) {
+        onUpdatePlanData({
+          ...data,
+          itinerary: result.itinerary.itinerary_days || result.itinerary || [],
+          route_optimization: result.route_optimization
+        });
+        setSwappingActivityId(null);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to swap activity. Please try again.");
+    } finally {
+      setApplyingSwap(false);
+    }
+  };
   const currency = data.budget?.currency || "INR";
   const fmt = (n: number) => new Intl.NumberFormat("en-IN", { style:"currency", currency, maximumFractionDigits:0 }).format(n||0);
   const budget: Budget = { total:0, transportation:0, accommodation:0, food:0, activities:0, currency:"INR", ...(data.budget||{}) };
@@ -339,6 +1048,7 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
     map: data.maps ? "✓" : "—",
     weather: `${data.weather.filter(w => w.temperature_max != null || w.description).length} days`,
     budget: fmt(budget.total),
+    hotels: hotelData ? `${hotelData.hotels.length}` : "—",
     events: `${data.events?.length || 0} found`,
   };
 
@@ -370,7 +1080,7 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
             return (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => handleTabChange(tab.id)}
                 className={`relative flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap transition-all duration-200 ${
                   isActive
                     ? "bg-gradient-to-r from-violet-600/80 to-fuchsia-600/60 text-white shadow-lg shadow-violet-500/20"
@@ -447,12 +1157,76 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
                     </div>
                   )}
                   <div className="space-y-3">
-                    {day.activities.map((act, ai) => (
-                      <motion.div key={ai} initial={{ opacity:0, x:-10 }} animate={{ opacity:1, x:0 }} transition={{ delay:0.08+index*0.06+ai*0.03 }} className="flex gap-3 items-start group">
-                        <div className="w-2 h-2 mt-2 rounded-full bg-red-800 group-hover:bg-red-500 transition-colors flex-shrink-0" />
-                        <p className="text-zinc-300 group-hover:text-zinc-100 transition-colors">{act}</p>
-                      </motion.div>
-                    ))}
+                    {day.activities.map((act, ai) => {
+                      const activityId = `day_${day.day}_act_${ai}`;
+                      const isThisSwapping = swappingActivityId === activityId;
+                      return (
+                        <div key={ai} className="flex flex-col gap-2">
+                          <motion.div initial={{ opacity:0, x:-10 }} animate={{ opacity:1, x:0 }} transition={{ delay:0.08+index*0.06+ai*0.03 }} className="flex gap-3 items-center justify-between group">
+                            <div className="flex gap-3 items-start">
+                              <div className="w-2 h-2 mt-2 rounded-full bg-red-800 group-hover:bg-red-500 transition-colors flex-shrink-0" />
+                              <p className="text-zinc-300 group-hover:text-zinc-100 transition-colors">{act}</p>
+                            </div>
+                            {sessionId && (
+                              <button
+                                onClick={() => handleFetchSwapOptions(activityId)}
+                                disabled={loadingSwapOptions || applyingSwap}
+                                className="opacity-0 group-hover:opacity-100 text-xs px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-lg transition-all flex items-center gap-1.5 ml-4 flex-shrink-0 border border-zinc-700/50"
+                              >
+                                <span>🔄</span> Swap
+                              </button>
+                            )}
+                          </motion.div>
+                          
+                          {/* Swap alternatives sub-panel */}
+                          {isThisSwapping && (
+                            <div className="ml-5 mt-2 p-4 bg-zinc-950/80 border border-violet-500/20 rounded-xl">
+                              {loadingSwapOptions ? (
+                                <div className="flex items-center gap-2 text-sm text-zinc-400">
+                                  <div className="w-4 h-4 border-2 border-zinc-600 border-t-violet-500 rounded-full animate-spin" />
+                                  Finding alternative spots...
+                                </div>
+                              ) : (
+                                <div className="space-y-3">
+                                  <div className="flex justify-between items-center mb-1">
+                                    <span className="text-xs font-semibold text-violet-300">Alternative Options:</span>
+                                    <button 
+                                      onClick={() => setSwappingActivityId(null)}
+                                      className="text-xs text-zinc-500 hover:text-zinc-300"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                  {swapAlternatives.length === 0 ? (
+                                    <p className="text-xs text-zinc-500">No alternatives found.</p>
+                                  ) : (
+                                    swapAlternatives.map((alt, idx) => (
+                                      <div key={idx} className="p-3 bg-zinc-900/50 hover:bg-zinc-900 border border-zinc-800/80 rounded-lg flex justify-between items-center gap-4 transition-all">
+                                        <div className="min-w-0">
+                                          <div className="flex items-center gap-2">
+                                            <span className="font-semibold text-sm text-white">{alt.name}</span>
+                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 capitalize">{alt.category}</span>
+                                          </div>
+                                          <p className="text-xs text-zinc-400 truncate mt-0.5">{alt.description}</p>
+                                          <span className="text-[10px] text-amber-400 font-medium mt-1 block">Cost: {alt.estimated_cost}</span>
+                                        </div>
+                                        <button
+                                          onClick={() => handleApplySwap(activityId, alt)}
+                                          disabled={applyingSwap}
+                                          className="px-3 py-1.5 bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs font-bold rounded-lg shadow-md transition-all flex-shrink-0"
+                                        >
+                                          {applyingSwap ? "Swapping..." : "Select"}
+                                        </button>
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </motion.div>
               );
@@ -476,13 +1250,21 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
           >
             {data.maps ? (
               <>
-                <RouteCard maps={data.maps} />
+              <RouteCard maps={data.maps} />
+                {data.maps.travel_options && (
+                  <TravelOptionsCard
+                    travelOptions={data.maps.travel_options}
+                    origin={data.maps.origin}
+                    destination={data.maps.destination}
+                  />
+                )}
                 <TripMap
                   mapsData={data.maps}
                   itineraryDays={data.itinerary}
                   origin={data.maps.origin}
                   destination={data.maps.destination}
                   routeOptimization={data.route_optimization}
+                  hotels={hotelData?.hotels || []}
                 />
               </>
             ) : (
@@ -588,6 +1370,27 @@ const ItineraryView = ({ data, userQuery }: { data: PlanData; userQuery: string 
             )}
           </motion.div>
         )}
+
+        {/* ── Hotels Tab ─────────────────────────────────────────────────────── */}
+        {activeTab === "hotels" && (
+          <motion.div
+            key="tab-hotels"
+            initial={{ opacity:0, y:16 }}
+            animate={{ opacity:1, y:0 }}
+            exit={{ opacity:0, y:-12 }}
+            transition={{ duration:0.25 }}
+          >
+            <HotelCard
+              hotels={hotelData?.hotels || []}
+              source={hotelData?.source || ""}
+              generatedAt={hotelData?.generated_at || ""}
+              destination={hotelData?.destination || data.maps?.destination || "your destination"}
+              onRetry={handleFetchHotels}
+              loading={loadingHotels}
+              error={hotelError}
+            />
+          </motion.div>
+        )}
       </AnimatePresence>
     </motion.div>
   );
@@ -602,6 +1405,10 @@ const Page = () => {
   const [error, setError] = useState<string | null>(null);
   const [preferenceWeights, setPreferenceWeights] = useState<Record<string, number> | null>(null);
   const [showPreferencePoll, setShowPreferencePoll] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const handleUpdatePlanData = (updatedPlan: PlanData) => {
+    setPlanData(updatedPlan);
+  };
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8010";
 
   useEffect(() => { const t = setInterval(() => setTitleIdx(p => (p+1)%titles.length), 4000); return () => clearInterval(t); }, []);
@@ -616,6 +1423,7 @@ const Page = () => {
       if (!startRes.ok) throw new Error((await startRes.json().catch(()=>({}))).detail || "Failed to start plan");
       const { session_id } = await startRes.json();
       if (!session_id) throw new Error("No session ID returned");
+      setSessionId(session_id);
 
       for (let i = 0; i < 40; i++) {
         await new Promise(r => setTimeout(r, 3000));
@@ -673,7 +1481,7 @@ const Page = () => {
     }
   }, [API_URL, preferenceWeights]);
 
-  const handleNewPlan = () => { setPlanData(null); setIsPlanning(false); setUserQuery(""); setError(null); setPreferenceWeights(null); setShowPreferencePoll(true); };
+  const handleNewPlan = () => { setPlanData(null); setIsPlanning(false); setUserQuery(""); setError(null); setPreferenceWeights(null); setShowPreferencePoll(true); setSessionId(null); };
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-black relative">
@@ -751,7 +1559,15 @@ const Page = () => {
                   <div className="text-zinc-400 text-sm">{planData.itinerary.length} day{planData.itinerary.length!==1?"s":""} planned</div>
                 </div>
               </div>
-              <div className="pt-8"><ItineraryView data={planData} userQuery={userQuery} /></div>
+              <div className="pt-8">
+                <ItineraryView
+                  data={planData}
+                  userQuery={userQuery}
+                  sessionId={sessionId}
+                  API_URL={API_URL}
+                  onUpdatePlanData={handleUpdatePlanData}
+                />
+              </div>
             </motion.div>
           )}
         </AnimatePresence>

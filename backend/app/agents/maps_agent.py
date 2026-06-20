@@ -35,6 +35,7 @@ CITY_COORDS: Dict[str, tuple] = {
     "goa":       (15.2993, 74.1240),
     "shimla":    (31.1048, 77.1734),
     "manali":    (32.2396, 77.1887),
+    "jammu":     (32.7266, 74.8570),
 }
 
 SPEED_KMH = {"driving": 60, "walking": 5, "cycling": 15, "public_transport": 40}
@@ -154,7 +155,22 @@ Keep it to 2-3 sentences.
         destination    = payload.get("destination", "").strip()
         transport_mode = payload.get("transport_mode", "driving")
         include_alternatives  = payload.get("include_alternatives", True)
-        include_travel_options = payload.get("include_travel_options", False)
+        # Clean date helper
+        def _clean_date_str(d_str: Any, get_end: bool = False) -> Optional[str]:
+            if not d_str or not isinstance(d_str, str):
+                return None
+            d_str = d_str.strip()
+            if " to " in d_str:
+                parts = d_str.split(" to ")
+                d_str = parts[1].strip() if get_end and len(parts) > 1 else parts[0].strip()
+            if "T" in d_str:
+                d_str = d_str.split("T")[0].strip()
+            return d_str
+
+        # Travel options: auto-enable when travel_dates are available
+        travel_dates = payload.get("travel_dates", [])
+        raw_travel_date = payload.get("travel_date") or (travel_dates[0] if travel_dates else None)
+        travel_date = _clean_date_str(raw_travel_date)
 
         if not origin:
             raise ValueError("Missing required field: origin")
@@ -243,18 +259,34 @@ Keep it to 2-3 sentences.
 
             result["alternative_routes"] = alternative_routes
 
-        # ── Optional travel options ───────────────────────────────────────────
-        if include_travel_options:
-            travel_date = payload.get("travel_date")
-            if travel_date:
+        # ── Travel options (flights, trains, buses) ───────────────────────────
+        if travel_date:
+            await self._send_streaming_update(
+                session_id=session_id,
+                update_type=StreamingUpdateType.PROGRESS,
+                message="Searching flights, trains & buses",
+                progress_percent=55,
+            )
+            try:
                 travel_options_result = await get_comprehensive_travel_options.ainvoke({
                     "origin":      origin,
                     "destination": destination,
                     "date":        travel_date,
-                    "checkin":     payload.get("checkin_date"),
-                    "checkout":    payload.get("checkout_date"),
+                    "checkin":     _clean_date_str(payload.get("checkin_date") or (travel_dates[0] if travel_dates else None)),
+                    "checkout":    _clean_date_str(payload.get("checkout_date") or (travel_dates[-1] if travel_dates else None), get_end=True),
                 })
                 result["travel_options"] = travel_options_result
+                self.logger.info(
+                    f"Travel options fetched: "
+                    f"flights={len(travel_options_result.get('flights', {}).get('flights', []))}, "
+                    f"trains={len(travel_options_result.get('trains', {}).get('trains', []))}, "
+                    f"buses={len(travel_options_result.get('buses', {}).get('buses', []))}"
+                )
+            except Exception as e:
+                self.logger.warning(f"Travel options fetch failed (non-fatal): {e}")
+                result["travel_options"] = {"flights": {"flights": []}, "trains": {"trains": []}, "buses": {"buses": []}}
+        else:
+            result["travel_options"] = {"flights": {"flights": []}, "trains": {"trains": []}, "buses": {"buses": []}}
 
         # ── LLM route analysis ────────────────────────────────────────────────
         await self._send_streaming_update(
@@ -270,6 +302,7 @@ Keep it to 2-3 sentences.
             origin=origin,
             destination=destination,
             session_id=session_id,
+            travel_options=result.get("travel_options"),
         )
 
         result["route_analysis"]   = route_analysis
@@ -297,6 +330,7 @@ Keep it to 2-3 sentences.
         origin: str,
         destination: str,
         session_id: str,
+        travel_options: Optional[Dict] = None,
     ) -> str:
         mode = primary_route.get("transport_mode", "driving")
         dist = primary_route.get("distance") or "unknown distance"
@@ -308,12 +342,26 @@ Keep it to 2-3 sentences.
             if r.get("distance") or r.get("duration")
         ]
 
+        # Build travel options summary for LLM
+        travel_summary = ""
+        if travel_options:
+            flights = travel_options.get("flights", {}).get("flights", [])
+            trains = travel_options.get("trains", {}).get("trains", [])
+            buses = travel_options.get("buses", {}).get("buses", [])
+            if flights:
+                travel_summary += f"\nFlights available: {len(flights)} options found."
+            if trains:
+                travel_summary += f"\nTrains available: {len(trains)} options found."
+            if buses:
+                travel_summary += f"\nBuses/Transit available: {len(buses)} options found."
+
         user_input = f"""
 Route: {origin} → {destination}
 Primary ({mode}): {dist}, {dur}
 {"Alternatives:" + chr(10) + chr(10).join(alt_lines) if alt_lines else ""}
+{travel_summary}
 
-Give a 2-3 sentence practical recommendation for this journey.
+Give a 2-3 sentence practical recommendation for this journey, mentioning flight/train/bus options if available.
 """
         try:
             return await self.invoke_llm(

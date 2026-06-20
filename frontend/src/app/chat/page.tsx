@@ -492,8 +492,63 @@ const BudgetCard = ({ data }) => {
 };
 
 // ── Itinerary card ────────────────────────────────────────────────────────────
-const ItineraryCard = ({ data }) => {
+const ItineraryCard = ({ 
+  data, 
+  sessionId, 
+  onUpdateResults 
+}: { 
+  data: any; 
+  sessionId: string | null; 
+  onUpdateResults: (updatedItinerary: any, updatedRouteOpt: any) => void;
+}) => {
   if (!data || !data.itinerary_days) return null;
+
+  const [swappingActivityId, setSwappingActivityId] = useState<string | null>(null);
+  const [swapAlternatives, setSwapAlternatives] = useState<any[]>([]);
+  const [loadingSwapOptions, setLoadingSwapOptions] = useState(false);
+  const [applyingSwap, setApplyingSwap] = useState(false);
+
+  const handleFetchSwapOptions = async (activityId: string) => {
+    setSwappingActivityId(activityId);
+    setLoadingSwapOptions(true);
+    try {
+      const res = await fetch(`http://localhost:8010/api/v2/orchestrator/session/${sessionId}/swap-options?activity_id=${activityId}`);
+      if (!res.ok) throw new Error("Failed to load options");
+      const result = await res.json();
+      setSwapAlternatives(result.alternatives || []);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to load swap alternatives.");
+    } finally {
+      setLoadingSwapOptions(false);
+    }
+  };
+
+  const handleApplySwap = async (activityId: string, alternative: any) => {
+    if (!sessionId) return;
+    setApplyingSwap(true);
+    try {
+      const res = await fetch(`http://localhost:8010/api/v2/orchestrator/session/${sessionId}/swap-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activity_id: activityId,
+          selected_alternative: alternative
+        })
+      });
+      if (!res.ok) throw new Error("Failed to apply swap");
+      const result = await res.json();
+      if (result.success) {
+        onUpdateResults(result.itinerary, result.route_optimization);
+        setSwappingActivityId(null);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to swap activity. Please try again.");
+    } finally {
+      setApplyingSwap(false);
+    }
+  };
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-6">
@@ -547,12 +602,76 @@ const ItineraryCard = ({ data }) => {
                 </div>
               )}
               <div className="space-y-2">
-                {day.activities.map((activity, actIdx) => (
-                  <motion.div key={actIdx} whileHover={{ x: 5 }}
-                    className="p-3 bg-black/20 rounded-xl border border-violet-500/10 hover:border-violet-500/30 transition-colors">
-                    <p className="text-violet-100 text-sm leading-relaxed">{activity}</p>
-                  </motion.div>
-                ))}
+                {day.activities.map((activity, actIdx) => {
+                  const activityId = `day_${day.day}_act_${actIdx}`;
+                  const isThisSwapping = swappingActivityId === activityId;
+                  return (
+                    <div key={actIdx} className="flex flex-col gap-2">
+                      <motion.div
+                        whileHover={{ x: 5 }}
+                        className="p-3 bg-black/20 rounded-xl border border-violet-500/10 hover:border-violet-500/30 transition-colors flex justify-between items-center group"
+                      >
+                        <p className="text-violet-100 text-sm leading-relaxed">{activity}</p>
+                        {sessionId && (
+                          <button
+                            onClick={() => handleFetchSwapOptions(activityId)}
+                            disabled={loadingSwapOptions || applyingSwap}
+                            className="opacity-0 group-hover:opacity-100 text-xs px-2 py-1 bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-all ml-4 flex-shrink-0"
+                          >
+                            Swap
+                          </button>
+                        )}
+                      </motion.div>
+                      
+                      {/* Swap alternatives sub-panel */}
+                      {isThisSwapping && (
+                        <div className="ml-2 p-4 bg-black/60 border border-violet-500/30 rounded-xl">
+                          {loadingSwapOptions ? (
+                            <div className="flex items-center gap-2 text-sm text-zinc-400">
+                              <div className="w-4 h-4 border-2 border-zinc-600 border-t-violet-500 rounded-full animate-spin" />
+                              Finding alternatives...
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="text-xs font-semibold text-violet-300">Alternative Spots:</span>
+                                <button 
+                                  onClick={() => setSwappingActivityId(null)}
+                                  className="text-xs text-zinc-500 hover:text-zinc-300"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {swapAlternatives.length === 0 ? (
+                                <p className="text-xs text-zinc-500">No alternatives found.</p>
+                              ) : (
+                                swapAlternatives.map((alt, idx) => (
+                                  <div key={idx} className="p-3 bg-zinc-900/40 hover:bg-zinc-900 border border-zinc-800 rounded-lg flex justify-between items-center gap-4 transition-all">
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-semibold text-sm text-white">{alt.name}</span>
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 capitalize">{alt.category}</span>
+                                      </div>
+                                      <p className="text-xs text-zinc-400 truncate mt-0.5">{alt.description}</p>
+                                      <span className="text-[10px] text-amber-400 font-medium mt-1 block">Cost: {alt.estimated_cost}</span>
+                                    </div>
+                                    <button
+                                      onClick={() => handleApplySwap(activityId, alt)}
+                                      disabled={applyingSwap}
+                                      className="px-3 py-1.5 bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs font-bold rounded-lg shadow-md transition-all flex-shrink-0"
+                                    >
+                                      {applyingSwap ? "Swapping..." : "Select"}
+                                    </button>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </motion.div>
           ))}
@@ -925,7 +1044,19 @@ const TravelChatPage = () => {
               )}
 
               {results.budget_data    && <BudgetCard    data={results.budget_data} />}
-              {results.itinerary_data && <ItineraryCard data={results.itinerary_data} />}
+              {results.itinerary_data && (
+                <ItineraryCard
+                  data={results.itinerary_data}
+                  sessionId={sessionId}
+                  onUpdateResults={(updatedItinerary, updatedRouteOpt) => {
+                    setResults(prev => ({
+                      ...prev,
+                      itinerary_data: updatedItinerary,
+                      route_optimization: updatedRouteOpt
+                    }));
+                  }}
+                />
+              )}
 
             </AnimatePresence>
 

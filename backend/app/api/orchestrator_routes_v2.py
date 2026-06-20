@@ -814,6 +814,488 @@ async def health_check():
             }
         )
 
+# ==================== HOTEL RECOMMENDATIONS ENDPOINT ====================
+
+@router.get("/session/{session_id}/hotels")
+async def get_hotel_recommendations(session_id: str, force_refresh: bool = False):
+    """
+    Get hotel recommendations for a trip session.
+
+    Pipeline:
+      1. Check Redis cache (6-hour TTL with generated_at)
+      2. If miss: Booking.com RapidAPI → real data
+      3. Groq LLM → tier categorization + descriptions + tips
+      4. Graceful degradation: API fail → Groq-only → empty state
+
+    Rate limited: 1 force-refresh per 10 minutes per session.
+    """
+    from app.services.hotel_service import (
+        fetch_hotels_from_booking,
+        enrich_hotels_with_llm,
+        generate_hotels_via_llm_only,
+        HOTEL_CACHE_TTL,
+        RATE_LIMIT_SECONDS,
+    )
+    from datetime import timezone
+
+    try:
+        orchestrator = get_orchestrator()
+        redis_client = orchestrator.redis_client
+
+        # 1. Get session state
+        state = await redis_client.get_state(session_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        destination = state.get("destination")
+        if not destination:
+            raise HTTPException(status_code=400, detail="No destination in this session")
+
+        travel_dates = state.get("travel_dates", [])
+
+        # 2. Check cache — return immediately if fresh
+        cached_hotel_data = state.get("hotel_data")
+        if cached_hotel_data and not force_refresh:
+            generated_at = cached_hotel_data.get("generated_at", "")
+            if generated_at:
+                try:
+                    gen_time = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                    age_seconds = (datetime.now(timezone.utc) - gen_time).total_seconds()
+                    if age_seconds < HOTEL_CACHE_TTL:
+                        logger.info(f"[Hotels] Cache hit for '{destination}' (age: {int(age_seconds)}s)")
+                        return cached_hotel_data
+                except (ValueError, TypeError):
+                    pass  # Invalid timestamp, re-fetch
+
+        # 3. Rate limiting on force-refresh
+        if force_refresh:
+            last_refresh = state.get("hotel_last_refresh", "")
+            if last_refresh:
+                try:
+                    last_time = datetime.fromisoformat(last_refresh.replace("Z", "+00:00"))
+                    since = (datetime.now(timezone.utc) - last_time).total_seconds()
+                    if since < RATE_LIMIT_SECONDS:
+                        remaining = int(RATE_LIMIT_SECONDS - since)
+                        raise HTTPException(
+                            status_code=429,
+                            detail=f"Rate limited. Try again in {remaining}s."
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+        # 4. Compute checkin / checkout from travel_dates
+        if travel_dates and len(travel_dates) >= 2:
+            checkin = travel_dates[0]
+            checkout = travel_dates[-1]
+        elif travel_dates and len(travel_dates) == 1:
+            checkin = travel_dates[0]
+            # Assume single day → next day checkout
+            from datetime import timedelta
+            try:
+                dt = datetime.strptime(checkin, "%Y-%m-%d")
+                checkout = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+            except ValueError:
+                checkout = checkin
+        else:
+            # Fallback to tomorrow/day-after
+            from datetime import timedelta
+            today = datetime.now().strftime("%Y-%m-%d")
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            checkin = today
+            checkout = tomorrow
+
+        # Ensure dates are in the future for Booking.com API stability
+        try:
+            from datetime import timedelta
+            today_dt = datetime.now().date()
+            checkin_dt = datetime.strptime(checkin, "%Y-%m-%d").date()
+            checkout_dt = datetime.strptime(checkout, "%Y-%m-%d").date()
+            if checkin_dt < today_dt:
+                duration = max((checkout_dt - checkin_dt).days, 1)
+                new_checkin = today_dt + timedelta(days=1)
+                new_checkout = new_checkin + timedelta(days=duration)
+                checkin = new_checkin.strftime("%Y-%m-%d")
+                checkout = new_checkout.strftime("%Y-%m-%d")
+                logger.info(f"[Hotels] Shifted past dates to future checkin: {checkin}, checkout: {checkout} (duration: {duration} days)")
+        except (ValueError, TypeError):
+            pass
+
+        # 5. Fetch from Booking.com → real data
+        source = "booking_com+groq"
+        hotels = await fetch_hotels_from_booking(destination, checkin, checkout)
+
+        if hotels:
+            # 6. Enrich with Groq LLM
+            groq_key = getattr(settings, "groq_api_key", None)
+            if groq_key:
+                hotels = await enrich_hotels_with_llm(hotels, destination, groq_key)
+        else:
+            # 7. Graceful degradation → Groq-only fallback
+            logger.warning(f"[Hotels] Booking.com returned no results, falling back to Groq-only")
+            source = "groq_fallback"
+            groq_key = getattr(settings, "groq_api_key", None)
+            if groq_key:
+                hotels = await generate_hotels_via_llm_only(
+                    destination, checkin, checkout, groq_key
+                )
+
+        # 8. Sort: 2 budget → 2 mid-range → 2 luxury (pick top 2 per tier)
+        tier_order = {"budget": 0, "mid-range": 1, "luxury": 2}
+        tier_buckets: dict = {"budget": [], "mid-range": [], "luxury": []}
+        for h in hotels:
+            tier = h.get("tier", "mid-range")
+            if tier in tier_buckets and len(tier_buckets[tier]) < 2:
+                tier_buckets[tier].append(h)
+
+        sorted_hotels = tier_buckets["budget"] + tier_buckets["mid-range"] + tier_buckets["luxury"]
+
+        # If we have fewer than 6 after filtering, add remaining hotels
+        seen_ids = {h["id"] for h in sorted_hotels}
+        for h in hotels:
+            if len(sorted_hotels) >= 6:
+                break
+            if h["id"] not in seen_ids:
+                sorted_hotels.append(h)
+                seen_ids.add(h["id"])
+
+        # 8b. Calculate distance to first itinerary stop coordinates
+        try:
+            import math
+            def calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+                R = 6371.0 # Earth's radius in km
+                dlat = math.radians(lat2 - lat1)
+                dlng = math.radians(lng2 - lng1)
+                a = (math.sin(dlat / 2) ** 2 + 
+                     math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2)
+                c = 2 * math.asin(math.sqrt(a))
+                return R * c
+
+            # Find first stop in day_routes that has valid lat/lng
+            first_stop = None
+            route_opt = state.get("route_optimization")
+            if route_opt and "day_routes" in route_opt:
+                day_routes = route_opt["day_routes"]
+                if day_routes and len(day_routes) > 0:
+                    first_day_stops = day_routes[0]
+                    for stop in first_day_stops:
+                        if stop and stop.get("lat") and stop.get("lng"):
+                            first_stop = stop
+                            break
+
+            if first_stop:
+                ref_lat = float(first_stop.get("lat"))
+                ref_lng = float(first_stop.get("lng"))
+                ref_name = first_stop.get("name") or "First attraction"
+                for h in sorted_hotels:
+                    h_lat = h.get("lat")
+                    h_lng = h.get("lng")
+                    if h_lat and h_lng:
+                        dist = calculate_distance(ref_lat, ref_lng, h_lat, h_lng)
+                        h["proximity"] = {
+                            "attraction_name": ref_name,
+                            "distance_km": round(dist, 1)
+                        }
+        except Exception as proximity_err:
+            logger.error(f"[Hotels] Failed to calculate proximity: {proximity_err}")
+
+        # 9. Build response
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        hotel_response = {
+            "destination": destination,
+            "currency": "INR",
+            "generated_at": now_utc,
+            "source": source,
+            "hotels": sorted_hotels,
+        }
+
+        # 10. Cache in session state
+        state["hotel_data"] = hotel_response
+        state["hotel_last_refresh"] = now_utc
+        await redis_client.set_state(session_id, state)
+
+        logger.info(
+            f"[Hotels] Returning {len(sorted_hotels)} hotels for '{destination}' "
+            f"(source={source})"
+        )
+        return hotel_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Hotels] Failed to get recommendations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== SWAP SUGGESTIONS ENDPOINTS ====================
+
+class SwapOption(BaseModel):
+    name: str
+    description: str
+    category: str
+    lat: float
+    lng: float
+    estimated_cost: str
+
+class SwapOptionsResponse(BaseModel):
+    activity_id: str
+    alternatives: List[SwapOption]
+
+class SwapApplyRequest(BaseModel):
+    activity_id: str
+    selected_alternative: SwapOption
+
+
+@router.get("/session/{session_id}/swap-options", response_model=SwapOptionsResponse)
+async def get_swap_options(session_id: str, activity_id: str):
+    """
+    Get 3 alternative options for a specific activity slot.
+    """
+    import re
+    try:
+        orchestrator = get_orchestrator()
+        redis_client = orchestrator.redis_client
+        
+        # 1. Get session state
+        state = await redis_client.get_state(session_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        destination = state.get("destination")
+        if not destination:
+            raise HTTPException(status_code=400, detail="No destination specified in this session")
+            
+        itinerary_data = state.get("itinerary_data")
+        if not itinerary_data:
+            raise HTTPException(status_code=400, detail="No itinerary found for this session")
+
+        # Parse activity_id, e.g. day_1_act_2
+        m = re.match(r'day_(\d+)_act_(\d+)', activity_id.lower())
+        if not m:
+            raise HTTPException(status_code=400, detail="Invalid activity_id format. Expected 'day_X_act_Y'")
+        
+        day_num = int(m.group(1))
+        act_idx = int(m.group(2))
+        
+        itinerary_days = itinerary_data if isinstance(itinerary_data, list) else itinerary_data.get("itinerary_days", [])
+        
+        # Check day bounds
+        day_idx = day_num - 1
+        if day_idx < 0 or day_idx >= len(itinerary_days):
+            raise HTTPException(status_code=404, detail=f"Day {day_num} not found in itinerary")
+            
+        day_obj = itinerary_days[day_idx]
+        activities = day_obj.get("activities", [])
+        if act_idx < 0 or act_idx >= len(activities):
+            raise HTTPException(status_code=404, detail=f"Activity index {act_idx} not found on Day {day_num}")
+            
+        # 2. Get list of tourist attractions for the city
+        from app.ml.attraction_database import get_attractions_for_city
+        all_attractions = await get_attractions_for_city(destination)
+        
+        # Collect all attraction names currently in the itinerary to avoid suggesting them
+        # Activity strings are formatted like: "10:00 AM - Taj Mahal - 2h (description)"
+        # We extract just the name part for accurate matching.
+        planned_names = set()
+        for day in itinerary_days:
+            for act in day.get("activities", []):
+                act_str = str(act).strip()
+                # Split by " - " to extract the name (second segment)
+                parts = [p.strip() for p in act_str.split(" - ")]
+                if len(parts) >= 2:
+                    # The name is typically the second part after the time
+                    extracted_name = parts[1].lower()
+                    planned_names.add(extracted_name)
+                else:
+                    # Fallback: use the whole string
+                    planned_names.add(act_str.lower())
+                
+        # 3. Filter attractions — use normalized name matching
+        alternatives = []
+        for attr in all_attractions:
+            attr_name_lower = attr["name"].lower().strip()
+            is_planned = False
+            for planned in planned_names:
+                # Exact match or one contains the other (on extracted names only)
+                if attr_name_lower == planned or attr_name_lower in planned or planned in attr_name_lower:
+                    is_planned = True
+                    break
+            if is_planned:
+                continue
+                
+            category = attr.get("category", "landmark")
+            est_cost = "Free"
+            if category in ("monument", "museum", "palace", "fort"):
+                est_cost = "₹50 - ₹200"
+            elif category == "market":
+                est_cost = "Varies"
+            
+            alternatives.append(SwapOption(
+                name=attr["name"],
+                description=attr.get("description") or f"A popular {category} in {destination}.",
+                category=category,
+                lat=attr["lat"],
+                lng=attr["lng"],
+                estimated_cost=est_cost
+            ))
+            
+            if len(alternatives) >= 3:
+                break
+                
+        # Note: No hardcoded fallbacks — get_attractions_for_city() returns
+        # 8-12 real attractions via Google Places / Groq LLM, which is more
+        # than enough to provide 3 alternatives after filtering.
+                
+        return SwapOptionsResponse(
+            activity_id=activity_id,
+            alternatives=alternatives
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get swap options: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/session/{session_id}/swap-apply")
+async def apply_swap(session_id: str, request: SwapApplyRequest):
+    """
+    Apply a swap to a specific activity slot, updating the itinerary text and Leaflet route optimization.
+    """
+    import re
+    try:
+        orchestrator = get_orchestrator()
+        redis_client = orchestrator.redis_client
+        
+        # 1. Get session state
+        state = await redis_client.get_state(session_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        itinerary_data = state.get("itinerary_data")
+        if not itinerary_data:
+            raise HTTPException(status_code=400, detail="No itinerary found for this session")
+            
+        activity_id = request.activity_id
+        selected = request.selected_alternative
+        
+        m = re.match(r'day_(\d+)_act_(\d+)', activity_id.lower())
+        if not m:
+            raise HTTPException(status_code=400, detail="Invalid activity_id format")
+            
+        day_num = int(m.group(1))
+        act_idx = int(m.group(2))
+        
+        itinerary_days = itinerary_data if isinstance(itinerary_data, list) else itinerary_data.get("itinerary_days", [])
+        day_idx = day_num - 1
+        
+        if day_idx < 0 or day_idx >= len(itinerary_days):
+            raise HTTPException(status_code=404, detail="Day not found")
+            
+        day_obj = itinerary_days[day_idx]
+        activities = day_obj.get("activities", [])
+        if act_idx < 0 or act_idx >= len(activities):
+            raise HTTPException(status_code=404, detail="Activity index not found")
+            
+        old_activity = activities[act_idx]
+        
+        # 2. Parse time and duration from old activity string
+        time_match = re.search(r'^(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))', old_activity)
+        time_str = time_match.group(1) if time_match else "10:00 AM"
+        
+        duration_match = re.search(r'-\s*(\d+(?:\.\d+)?\s*(?:h|hr|hrs|mins|m))\s*(?:-|$|\()', old_activity)
+        duration_str = duration_match.group(1) if duration_match else "2h"
+        
+        # Reconstruct new activity string
+        desc_clean = selected.description.replace("(", "").replace(")", "")
+        desc_clean = desc_clean[:60] + "..." if len(desc_clean) > 60 else desc_clean
+        new_activity = f"{time_str} - {selected.name} - {duration_str} ({desc_clean})"
+        
+        # Update text activity list
+        activities[act_idx] = new_activity
+        
+        # 3. Update route_optimization map routes
+        route_opt = state.get("route_optimization")
+        if route_opt and isinstance(route_opt, dict) and "day_routes" in route_opt:
+            day_routes = route_opt.get("day_routes", [])
+            if day_idx < len(day_routes):
+                day_stops = day_routes[day_idx]
+                
+                # Find matching stop by name or index
+                matched_stop_idx = -1
+                old_name_candidate = old_activity
+                parts = [p.strip() for p in old_activity.split("-")]
+                if len(parts) >= 2:
+                    old_name_candidate = parts[1]
+                
+                for idx, stop in enumerate(day_stops):
+                    stop_name = stop.get("name", "").lower()
+                    if stop_name in old_name_candidate.lower() or old_name_candidate.lower() in stop_name:
+                        matched_stop_idx = idx
+                        break
+                        
+                if matched_stop_idx == -1 and len(day_stops) > 0:
+                    matched_stop_idx = min(act_idx, len(day_stops) - 1)
+                    
+                if 0 <= matched_stop_idx < len(day_stops):
+                    day_stops[matched_stop_idx] = {
+                        "name": selected.name,
+                        "lat": selected.lat,
+                        "lng": selected.lng,
+                        "visit_minutes": day_stops[matched_stop_idx].get("visit_minutes", 60),
+                        "category": selected.category
+                    }
+                    
+                    # 4. Re-optimize using OR-Tools
+                    from app.ml.route_optimizer import optimize_day_order, _route_total_km
+                    ordered_stops = optimize_day_order(day_stops)
+                    day_routes[day_idx] = ordered_stops
+                    
+                    # Recalculate stats
+                    total_optimized_km = 0.0
+                    total_naive_km = 0.0
+                    for d_stops in day_routes:
+                        if d_stops:
+                            total_optimized_km += _route_total_km(d_stops)
+                            total_naive_km += _route_total_km(d_stops)
+                            
+                    route_opt["stats"] = {
+                        "total_optimized_km": round(total_optimized_km, 1),
+                        "total_naive_km": round(total_naive_km, 1),
+                        "km_saved": round(max(0, total_naive_km - total_optimized_km), 1),
+                        "ortools_used": route_opt.get("stats", {}).get("ortools_used", True)
+                    }
+                    
+        # 5. Save updated state back to Redis
+        await redis_client.set_state(session_id, state)
+        
+        # 6. Publish streaming update on WS channel
+        try:
+            await orchestrator._send_streaming_update(
+                session_id=session_id,
+                agent="orchestrator",
+                message="Itinerary updated — route optimized",
+                update_type="agent_update",
+                progress_percent=100,
+                data={
+                    "itinerary_data": itinerary_data,
+                    "route_optimization": route_opt
+                }
+            )
+        except Exception as ws_err:
+            logger.warning(f"Failed to send streaming update: {ws_err}")
+            
+        return {
+            "success": True,
+            "itinerary": itinerary_data,
+            "route_optimization": route_opt
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to apply swap: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ==================== EXPORT STARTUP/SHUTDOWN HANDLERS ====================
 

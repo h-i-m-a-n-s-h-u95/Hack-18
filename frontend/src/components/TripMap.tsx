@@ -32,6 +32,27 @@ interface RouteStop {
   category?: string;
 }
 interface ItineraryDay { day: number; date: string; activities: string[] }
+interface HotelInfo {
+  id?: string;
+  name?: string;
+  area?: string;
+  price_per_night?: number | null;
+  currency?: string;
+  rating?: number;
+  review_count?: number;
+  photo_url?: string;
+  booking_url?: string;
+  lat?: number;
+  lng?: number;
+  tier?: string;
+  amenities?: string[];
+  description?: string;
+  booking_tip?: string;
+  proximity?: {
+    attraction_name: string;
+    distance_km: number;
+  };
+}
 interface TripMapProps {
   mapsData: MapsData;
   itineraryDays?: ItineraryDay[];
@@ -43,6 +64,7 @@ interface TripMapProps {
     km_saved: number;
     day_routes?: RouteStop[][];
   };
+  hotels?: HotelInfo[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,6 +141,7 @@ export default function TripMap({
   origin,
   destination,
   routeOptimization,
+  hotels = [],
   apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010",
 }: TripMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -411,6 +434,39 @@ export default function TripMap({
         );
       }
 
+      // Draw hotel markers if available
+      if (hotels && hotels.length > 0) {
+        hotels.forEach((hotel) => {
+          if (hotel.lat && hotel.lng) {
+            const hIcon = L.divIcon({
+              html: makeMarkerSvg("🏨", "#3b82f6"), // Distinct blue marker for hotels
+              className: "",
+              iconSize: [36, 44],
+              iconAnchor: [18, 42],
+              popupAnchor: [0, -40],
+            });
+            const fmtPriceText = hotel.price_per_night 
+              ? `₹${hotel.price_per_night.toLocaleString("en-IN")}/night` 
+              : "Price N/A";
+            const ratingText = hotel.rating ? `⭐ ${hotel.rating}/10` : "";
+            const popupHtml = `
+              <div style="font-family: system-ui, sans-serif; font-size: 12px; color: #1f2937; padding: 2px;">
+                <h4 style="margin: 0 0 4px; font-weight: bold; color: #1e1b4b;">${hotel.name}</h4>
+                <p style="margin: 0 0 4px; color: #4b5563;">📍 ${hotel.area}</p>
+                <div style="display: flex; justify-content: space-between; font-weight: 600;">
+                  <span>${fmtPriceText}</span>
+                  <span style="color: #b45309;">${ratingText}</span>
+                </div>
+              </div>
+            `;
+            L.marker([hotel.lat, hotel.lng], { icon: hIcon })
+              .addTo(map)
+              .bindPopup(popupHtml);
+            bounds.push([hotel.lat, hotel.lng]);
+          }
+        });
+      }
+
       // Fit bounds
       if (bounds.length > 1) {
         map.fitBounds(bounds, { padding: [48, 48], maxZoom: 13 });
@@ -426,7 +482,7 @@ export default function TripMap({
     initMap();
     return () => { isMounted = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapData, viewMode, activeDay, mapStyle]);
+  }, [mapData, viewMode, activeDay, mapStyle, hotels]);
 
   // ── Step 3: toggle polyline styles on mode change ─────────────────────────
   useEffect(() => {

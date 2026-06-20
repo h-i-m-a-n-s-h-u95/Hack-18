@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     openweb_ninja_base_url: str = "https://api.openwebninja.com/realtime-events-data/search-events"
     openweb_ninja_timeout: float = 30.0
 
+    # Travel Options API Hosts (RapidAPI)
+    skyscanner_host: str = "skyscanner-flights-travel-api.p.rapidapi.com"
+    trains_host: str = "irctc1.p.rapidapi.com"
+    tripgo_host: str = "skedgo-tripgo-v1.p.rapidapi.com"
+    hotels_host: str = "booking-com.p.rapidapi.com"
+
     # Redis Configuration
     redis_url: str = "redis://localhost:6379"   # overridden by REDIS_URL in .env
     redis_max_connections: int = 50
