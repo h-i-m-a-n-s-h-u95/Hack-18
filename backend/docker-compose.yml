@@ -36,7 +36,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - DEBUG=true
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -69,7 +69,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - WORKER_TYPE=orchestrator
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: python -m app.workers.orchestrator_worker
@@ -102,7 +102,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - WORKER_TYPE=weather
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: python -m app.workers.weather_worker
@@ -130,7 +130,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - WORKER_TYPE=events
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: python -m app.workers.events_worker
@@ -158,7 +158,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - WORKER_TYPE=maps
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: python -m app.workers.maps_worker
@@ -186,7 +186,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - WORKER_TYPE=budget
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: python -m app.workers.budget_worker
@@ -214,7 +214,7 @@ services:
       - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
       - WORKER_TYPE=itinerary
       - STREAMING_ENABLED=true
-      - MODEL_NAME=llama-3.3-70b-versatile
+      - MODEL_NAME=${MODEL_NAME}
     volumes:
       - ./app:/app/app
     command: python -m app.workers.itinerary_worker

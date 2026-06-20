@@ -216,7 +216,7 @@ Output raw JSON only. No markdown, no code fences, no extra text."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": settings.model_name,
                     "messages": [
                         {"role": "system", "content": "You are a travel expert. Always output valid JSON only."},
                         {"role": "user", "content": prompt},
@@ -327,7 +327,7 @@ Output ONLY a raw JSON array. No markdown, no code fences."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": settings.model_name,
                     "messages": [
                         {"role": "system", "content": "You are a travel expert. Always output valid JSON only."},
                         {"role": "user", "content": prompt},

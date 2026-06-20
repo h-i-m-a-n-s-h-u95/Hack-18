@@ -74,18 +74,18 @@ class OrchestratorAgent:
         self,
         redis_client: Optional[RedisClient] = None,
         groq_api_key: str = None,
-        model_name: str = "llama-3.3-70b-versatile"
+        model_name: Optional[str] = None
     ):
         self.redis_client = redis_client or get_redis_client()
         self.logger = logging.getLogger("orchestrator")
         
         # Initialize Gemini LLM
-        api_key = getattr(settings, 'groq_api_key', None)
+        model_to_use = model_name or settings.model_name
         self.llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=getattr(settings, 'groq_api_key', None),
-    temperature=0.3,
-)
+            model=model_to_use,
+            api_key=getattr(settings, 'groq_api_key', None),
+            temperature=0.3,
+        )
         
         # Build LangGraph workflow
         self.graph = self._build_graph()

@@ -245,13 +245,21 @@ RULES:
 1. Respond ONLY with a valid JSON array — no markdown, no explanation, no extra text
 2. Exactly {total_days} objects in the array, one per date
 3. Dates must be exactly in this order: {dates_str}
-4. Each day has 3-5 activities max (relaxed pace, not overly packed)
-5. Use SPECIFIC real place names, restaurant names, hotel names
-6. Include timing (9:00 AM, 1:00 PM etc) and entry fees where relevant
-7. Day 1: include arrival logistics and hotel recommendation near attractions
-8. Last day: include checkout and departure logistics
-9. Include monsoon/weather tips in notes if applicable
-10. estimated_cost is a number (INR) per day for both travelers combined
+4. Each day's "activities" list must be organized into time blocks, in this order:
+   Morning, Midday, Afternoon, Late Afternoon / Sunset, Evening
+   (skip a block only if truly nothing fits)
+5. Each time block gets 1-3 bullet points (vary the count — Morning and Evening usually
+   get 2-3, Midday often just 1 major stop)
+6. Only the FIRST bullet point of a time block should start with the time block prefix (e.g. "Morning: **[Place Name]** — [vibe], [tip]").
+   Any subsequent bullet points in that same time block MUST NOT repeat the label, and instead must start with "- **[Place Name]** — [vibe], [tip]".
+7. Use SPECIFIC real place names, restaurant names, hotel names — never invent generic ones
+8. Where relevant, offer a genuine alternative ("Or if you'd rather X, Y is also great")
+9. Add real practical caveats where they matter (e.g. "book ahead", "only open Fridays", entry fees)
+10. No generic filler like "explore local culture" — name actual dishes, views, specific details
+11. Day 1: first Morning bullet covers arrival logistics and hotel check-in
+12. Last day: last Evening bullet covers checkout/departure logistics
+13. Include monsoon/weather tips in notes if applicable
+14. estimated_cost is a number (INR) per day for both travelers combined
 
 Respond with ONLY this JSON structure:
 [
@@ -259,11 +267,14 @@ Respond with ONLY this JSON structure:
     "day": 1,
     "date": "{travel_dates[0]}",
     "activities": [
-      "9:00 AM - Arrive at ...",
-      "11:00 AM - Check in to ...",
-      "1:00 PM - Lunch at ...",
-      "3:00 PM - Visit ...",
-      "7:00 PM - Dinner at ..."
+      "Morning: **[Place Name]** — [vibe], [tip]",
+      "- **[Place Name]** — [vibe], [tip]",
+      "Midday: **[Place Name]** — [vibe], [tip]",
+      "Afternoon: **[Place Name]** — [vibe], [tip]",
+      "- **[Place Name]** — [vibe], [tip]",
+      "Late Afternoon / Sunset: **[Place Name]** — [vibe], [tip]",
+      "Evening: **[Place Name]** — [vibe], [tip]",
+      "- **[Place Name]** — [vibe], [tip]"
     ],
     "notes": "Practical tip or weather note for this day",
     "estimated_cost": {int(daily_budget)}
@@ -281,7 +292,7 @@ Respond with ONLY this JSON structure:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": os.environ.get("MODEL_NAME", "llama-3.1-8b-instant"),
                     "max_tokens": 4096,
                     "temperature": 0.7,
                     "messages": [

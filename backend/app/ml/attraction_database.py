@@ -188,7 +188,7 @@ Do not include any code block formatting, markdown formatting, or preamble text.
                     "https://api.groq.com/openai/v1/chat/completions",
                     headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
                     json={
-                        "model": "llama-3.3-70b-versatile",
+                        "model": settings.model_name,
                         "messages": [
                             {"role": "system", "content": "You are a travel expert. Always output JSON only."},
                             {"role": "user", "content": prompt}
