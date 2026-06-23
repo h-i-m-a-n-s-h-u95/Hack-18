@@ -4,7 +4,13 @@
 
 ## 🚀 What's New in v2.0
 
-### Redis MCP Architecture
+### Model Context Protocol (MCP) Standard Integration
+- **Standardized FastMCP Server**: A standalone server exposing **38 custom travel planning tools** (flights, hotels, weather, routes, budget, events, etc.) over Server-Sent Events (SSE).
+- **Dynamic Tool Binding**: Agents dynamically fetch and bind to MCP tools when enabled, allowing modular tool management.
+- **MCP Inspector Support**: Test and run tools interactively via the official MCP inspector UI.
+- **Toggleable Integration**: Easily enable/disable MCP using the `MCP_ENABLED` flag.
+
+### Redis Parallel Worker Architecture
 - **Parallel Agent Execution**: All 5 agents run simultaneously via Redis pub/sub for 3-5x faster responses
 - **Real-time Streaming Updates**: Live progress notifications as each agent completes its work
 - **Horizontally Scalable Workers**: Each agent runs in isolated Docker containers with configurable replicas
@@ -27,6 +33,8 @@
 ringmaster-round-table/
 ├── app/
 │   ├── main.py                        # FastAPI application entry point
+│   ├── mcp_server.py                  # FastMCP server hosting 38 travel tools
+│   ├── mcp_client.py                  # Multi-Server MCP client adapter
 │   │
 │   ├── config/
 │   │   └── settings.py                # Configuration with Redis & timeouts
@@ -133,6 +141,10 @@ DEBUG=true
 STREAMING_ENABLED=true
 MODEL_NAME=gemini-1.5-pro
 TEMPERATURE=0.7
+
+# Model Context Protocol (MCP)
+MCP_ENABLED=false
+MCP_SERVER_URL=http://mcp-server:9000/sse
 ```
 
 ### 4. Installation
@@ -183,6 +195,9 @@ python -m app.workers.events_worker
 python -m app.workers.maps_worker
 python -m app.workers.budget_worker
 python -m app.workers.itinerary_worker
+
+# Terminal 7: Start MCP Server (Optional)
+python -m app.mcp_server
 ```
 
 ---
@@ -479,6 +494,40 @@ Value: {
   "budget_data": {...},
   "itinerary_data": [...]
 }
+```
+
+---
+
+## 🔌 Model Context Protocol (MCP) Integration
+
+TBuddy now implements the industry-standard **Model Context Protocol (MCP)**, exposing its extensive collection of travel tools as an MCP-compliant service. Other applications, desktop AI agents (e.g. Claude Desktop), or internal agents can standardly access and execute these tools.
+
+### Key Capabilities
+- **Unified Tool Server**: Serves **38 travel tools** across 5 domains (flights, hotels, weather, routes, events, budgeting, and itinerary planning) through [mcp_server.py](file:///Users/alisha/Hack-18-2/backend/app/mcp_server.py).
+- **Flexible SSE Transport**: Serves tools over Server-Sent Events (SSE) on port `9000` via the `/sse` route.
+- **Adapter Client**: A multi-server client in [mcp_client.py](file:///Users/alisha/Hack-18-2/backend/app/mcp_client.py) connects agents to the MCP endpoints.
+- **Dynamic Tool Resolution**: Agents retrieve tools dynamically at startup, ensuring they are always up to date.
+
+### Running and Interacting with MCP
+
+#### Start MCP Server locally
+To start the standalone MCP tool server:
+```bash
+python -m app.mcp_server
+```
+The server will bind to `http://localhost:9000/sse`.
+
+#### Testing with MCP Inspector
+The server is fully compatible with the official Model Context Protocol Inspector tool:
+```bash
+npx @modelcontextprotocol/inspector http://localhost:9000/sse
+```
+This launches a browser playground (usually at `http://localhost:6274`) where you can interactively invoke and test any of the 38 travel tools.
+
+#### MCP Endpoint Status
+FastAPI provides a health and tool status route for checking connection to the MCP server:
+```bash
+curl http://localhost:8000/mcp/status
 ```
 
 ---
