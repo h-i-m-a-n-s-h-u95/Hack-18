@@ -285,7 +285,9 @@ async def status():
             "temperature": settings.temperature,
             "max_parallel_agents": settings.max_parallel_agents,
             "orchestrator_timeout": f"{settings.orchestrator_timeout}ms",
-            "streaming_enabled": settings.streaming_enabled
+            "streaming_enabled": settings.streaming_enabled,
+            "mcp_enabled": settings.mcp_enabled,
+            "mcp_server_url": settings.mcp_server_url if settings.mcp_enabled else None,
         }
     }
 
@@ -297,6 +299,40 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.get("/mcp/status")
+async def mcp_status():
+    """Check MCP server connectivity and list available tools."""
+    if not settings.mcp_enabled:
+        return {
+            "mcp_enabled": False,
+            "message": "MCP is disabled. Set MCP_ENABLED=true to enable.",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    try:
+        from app.mcp_client import check_mcp_health
+        health = await check_mcp_health()
+        return {
+            "mcp_enabled": True,
+            **health,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except ImportError:
+        return {
+            "mcp_enabled": True,
+            "status": "error",
+            "message": "langchain-mcp-adapters not installed",
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        return {
+            "mcp_enabled": True,
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
 
 
 if __name__ == "__main__":

@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     agent_retry_attempts: int = 2
     orchestrator_timeout: int = 600000
 
+    # MCP (Model Context Protocol) Configuration
+    mcp_enabled: bool = False
+    mcp_server_url: str = "http://mcp-server:9000/sse"
+
     # Streaming Configuration
     streaming_enabled: bool = True
     streaming_chunk_delay_ms: int = 100

@@ -12,6 +12,13 @@ from enum import Enum
 from app.config.settings import settings
 from app.messaging.redis_client import RedisClient, RedisChannels
 
+# MCP support (optional — only used when MCP_ENABLED=true)
+try:
+    from app.mcp_client import get_mcp_tools, check_mcp_health
+    _MCP_AVAILABLE = True
+except ImportError:
+    _MCP_AVAILABLE = False
+
 
 # ==================== ENUMS & PROTOCOLS ====================
 
@@ -92,6 +99,10 @@ class BaseAgent(ABC):
         # stored separately so invoke_llm can rebind if needed.
         self._llm_with_tools = self.llm.bind_tools(self.tools) if self.tools else self.llm
 
+        # MCP mode flag — when True, tools will be loaded from MCP server
+        self._mcp_enabled = settings.mcp_enabled and _MCP_AVAILABLE
+        self._mcp_tools_loaded = False
+
         self.start_time = datetime.utcnow()
         self._subscription_id: Optional[str] = None
         self._is_running = False
@@ -114,6 +125,11 @@ class BaseAgent(ABC):
             return
 
         await self.redis_client.connect()
+
+        # Optionally load tools from MCP server
+        if self._mcp_enabled and not self._mcp_tools_loaded:
+            await self._load_mcp_tools()
+
         request_channel = RedisChannels.get_request_channel(self.agent_type.value)
 
         self._subscription_id = await self.redis_client.subscribe(
@@ -287,6 +303,32 @@ class BaseAgent(ABC):
         """Execute tools and get final response (override in subclasses for full tool loops)."""
         return response.content if hasattr(response, "content") else str(response)
 
+    # ==================== MCP INTEGRATION ====================
+
+    async def _load_mcp_tools(self):
+        """
+        Attempt to load tools from the MCP server.  Falls back to native
+        tools if the server is unreachable or returns nothing.
+        """
+        try:
+            mcp_tools = await get_mcp_tools()
+            if mcp_tools:
+                self.logger.info(
+                    f"🔌 {self.name}: Loaded {len(mcp_tools)} tools from MCP server "
+                    f"(replacing {len(self.tools)} native tools)"
+                )
+                self.tools = mcp_tools
+                self._llm_with_tools = self.llm.bind_tools(self.tools)
+                self._mcp_tools_loaded = True
+            else:
+                self.logger.warning(
+                    f"⚠️ {self.name}: MCP server returned 0 tools — keeping native tools"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"⚠️ {self.name}: MCP tool loading failed ({e}) — keeping native tools"
+            )
+
     # ==================== UTILITY ====================
 
     def log_action(self, action: str, details: Optional[str] = None):
@@ -310,5 +352,7 @@ class BaseAgent(ABC):
             "uptime_seconds": int(uptime),
             "is_running":     self._is_running,
             "has_subscription": self._subscription_id is not None,
+            "mcp_enabled":    self._mcp_enabled,
+            "mcp_tools_loaded": self._mcp_tools_loaded,
             "version":        "1.0.0",
         }

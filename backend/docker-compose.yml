@@ -37,6 +37,8 @@ services:
       - DEBUG=true
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -46,6 +48,8 @@ services:
       redis:
         condition: service_healthy
       orchestrator:
+        condition: service_started
+      mcp-server:
         condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -70,9 +74,43 @@ services:
       - WORKER_TYPE=orchestrator
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: python -m app.workers.orchestrator_worker
+    networks:
+      - TBuddy-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==================== MCP SERVER ====================
+  mcp-server:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    container_name: TBuddy-mcp-server
+    ports:
+      - "9000:9000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - OPENROUTE_API_KEY=${OPENROUTE_API_KEY}
+      - OPENWEB_NINJA_API_KEY=${OPENWEB_NINJA_API_KEY}
+      - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RAPIDAPI_API_KEY=${RAPIDAPI_API_KEY}
+      - MODEL_NAME=${MODEL_NAME}
+    volumes:
+      - ./app:/app/app
+    command: python -m app.mcp_server
     networks:
       - TBuddy-network
     depends_on:
@@ -103,6 +141,8 @@ services:
       - WORKER_TYPE=weather
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: python -m app.workers.weather_worker
@@ -131,6 +171,8 @@ services:
       - WORKER_TYPE=events
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: python -m app.workers.events_worker
@@ -159,6 +201,8 @@ services:
       - WORKER_TYPE=maps
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: python -m app.workers.maps_worker
@@ -187,6 +231,8 @@ services:
       - WORKER_TYPE=budget
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: python -m app.workers.budget_worker
@@ -215,6 +261,8 @@ services:
       - WORKER_TYPE=itinerary
       - STREAMING_ENABLED=true
       - MODEL_NAME=${MODEL_NAME}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_SERVER_URL=http://mcp-server:9000/sse
     volumes:
       - ./app:/app/app
     command: python -m app.workers.itinerary_worker
