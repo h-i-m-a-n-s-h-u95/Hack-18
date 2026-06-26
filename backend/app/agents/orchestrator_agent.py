@@ -11,6 +11,7 @@ import uuid
 from app.agents.base_agent import AgentType, AgentStatus, StreamingUpdateType
 from app.messaging.redis_client import RedisClient, RedisChannels, get_redis_client
 from app.config.settings import settings
+from app.tools.itinerary_tools import expand_travel_dates
 
 
 # ==================== STATE DEFINITION ====================
@@ -388,6 +389,7 @@ Extract from the NEW query (fill in missing fields or UPDATE existing ones):
 - destination
 - origin
 - travel_dates (YYYY-MM-DD format)
+- duration (number of days, e.g., 4)
 - travelers_count (default 1)
 - budget_range
 - interests
@@ -400,6 +402,7 @@ Return EXACTLY in this format:
 Destination: <destination or "Keep existing">
 Origin: <origin or "Keep existing">
 Travel Dates: <dates or "Keep existing">
+Duration: <number of days, or "Not specified", or "Keep existing">
 Travelers Count: <number or "Keep existing" or 1>
 Budget Range: <budget or "Keep existing">
 Interests: <interests or "Keep existing">
@@ -424,8 +427,36 @@ Query Type: <query_type>
                 state["origin"] = parsed_data["origin"]
             
             if parsed_data.get("travel_dates") and parsed_data["travel_dates"] != ["keep_existing"]:
-                state["travel_dates"] = parsed_data["travel_dates"]
+                state["travel_dates"] = expand_travel_dates(parsed_data["travel_dates"])
             
+            # Align travel_dates with duration if specified
+            duration = parsed_data.get("duration")
+            if duration and duration != "keep_existing":
+                try:
+                    duration_days = int(duration)
+                except (ValueError, TypeError):
+                    duration_days = None
+                
+                if duration_days and duration_days > 0:
+                    current_dates = state.get("travel_dates") or []
+                    if current_dates:
+                        try:
+                            from datetime import datetime, timedelta
+                            start_date = datetime.strptime(current_dates[0], "%Y-%m-%d")
+                            adjusted_dates = []
+                            for i in range(duration_days):
+                                adjusted_dates.append((start_date + timedelta(days=i)).strftime("%Y-%m-%d"))
+                            state["travel_dates"] = adjusted_dates
+                        except Exception as e:
+                            self.logger.warning(f"Failed to adjust dates with duration: {e}")
+                    else:
+                        try:
+                            from datetime import date, timedelta
+                            start_date = date.today() + timedelta(days=1)
+                            state["travel_dates"] = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(duration_days)]
+                        except Exception as e:
+                            self.logger.warning(f"Failed to generate dates with duration: {e}")
+
             if parsed_data.get("travelers_count") and parsed_data["travelers_count"] != "keep_existing":
                 state["travelers_count"] = parsed_data["travelers_count"]
             if state.get("travelers_count") is None:
@@ -468,6 +499,7 @@ Query Type: <query_type>
             "destination": None,
             "origin": None,
             "travel_dates": [],
+            "duration": None,
             "travelers_count": 1,
             "budget_range": None,
             "interests": [],
@@ -494,6 +526,8 @@ Query Type: <query_type>
                         result["origin"] = "keep_existing"
                     elif "travel dates" in key or "dates" in key:
                         result["travel_dates"] = ["keep_existing"]
+                    elif "duration" in key:
+                        result["duration"] = "keep_existing"
                     elif "travelers" in key or "count" in key:
                         result["travelers_count"] = "keep_existing"
                     elif "budget" in key:
@@ -509,6 +543,8 @@ Query Type: <query_type>
                 result["travel_dates"] = [
                 d for d in dates if d and d.lower() not in ["not specified", "keep existing"]
                  ]
+            elif "duration" in key:
+                result["duration"] = value
             elif "travelers" in key or "count" in key:
                 try:
                     result["travelers_count"] = int(value.split()[0])

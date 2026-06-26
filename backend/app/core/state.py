@@ -6,6 +6,7 @@ import json
 import uuid
 from app.messaging.redis_client import get_redis_client, RedisChannels
 from app.messaging import redis_client
+from app.tools.itinerary_tools import expand_travel_dates
 
 
 class AgentStatus(str, Enum):
@@ -234,7 +235,7 @@ def create_initial_state(
         # Input
         destination=destination,
         origin=origin,
-        travel_dates=travel_dates,
+        travel_dates=expand_travel_dates(travel_dates),
         travelers_count=travelers_count,
         budget_range=budget_range,
         user_preferences=user_preferences.dict() if user_preferences else None,

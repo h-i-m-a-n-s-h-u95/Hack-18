@@ -104,6 +104,8 @@ def expand_travel_dates(travel_dates: List[str]) -> List[str]:
     """
     Expand date range strings into individual dates.
     ["2026-07-15 to 2026-07-18"] -> ["2026-07-15","2026-07-16","2026-07-17","2026-07-18"]
+    Also handles lists of two dates representing start and end of trip:
+    ["2026-07-15", "2026-07-19"] -> ["2026-07-15","2026-07-16","2026-07-17","2026-07-18","2026-07-19"]
     """
     expanded = []
     for d in travel_dates:
@@ -112,14 +114,33 @@ def expand_travel_dates(travel_dates: List[str]) -> List[str]:
             r'(\d{4}-\d{2}-\d{2})\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2})', d
         )
         if range_match:
-            start = datetime.strptime(range_match.group(1), "%Y-%m-%d")
-            end = datetime.strptime(range_match.group(2), "%Y-%m-%d")
-            cur = start
-            while cur <= end:
-                expanded.append(cur.strftime("%Y-%m-%d"))
-                cur += timedelta(days=1)
+            try:
+                start = datetime.strptime(range_match.group(1), "%Y-%m-%d")
+                end = datetime.strptime(range_match.group(2), "%Y-%m-%d")
+                cur = start
+                while cur <= end:
+                    expanded.append(cur.strftime("%Y-%m-%d"))
+                    cur += timedelta(days=1)
+            except ValueError:
+                expanded.append(d)
         else:
             expanded.append(d)
+
+    # Handle list of two dates [start_date, end_date]
+    if len(expanded) == 2:
+        try:
+            start = datetime.strptime(expanded[0], "%Y-%m-%d")
+            end = datetime.strptime(expanded[1], "%Y-%m-%d")
+            if start <= end:
+                all_dates = []
+                cur = start
+                while cur <= end:
+                    all_dates.append(cur.strftime("%Y-%m-%d"))
+                    cur += timedelta(days=1)
+                return all_dates
+        except ValueError:
+            pass
+
     return expanded if expanded else travel_dates
 
 

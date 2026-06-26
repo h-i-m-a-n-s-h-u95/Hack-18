@@ -142,6 +142,19 @@ function expandTravelDates(rawDates: string[]): string[] {
     if (m) { const c = new Date(m[1]), e = new Date(m[2]); while (c <= e) { out.push(c.toISOString().split("T")[0]); c.setDate(c.getDate() + 1); } }
     else out.push(d);
   }
+  if (out.length === 2) {
+    const start = new Date(out[0]);
+    const end = new Date(out[1]);
+    if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && start <= end) {
+      const full: string[] = [];
+      const cur = new Date(start);
+      while (cur <= end) {
+        full.push(cur.toISOString().split("T")[0]);
+        cur.setDate(cur.getDate() + 1);
+      }
+      return full;
+    }
+  }
   return out.length > 0 ? out : rawDates;
 }
 
